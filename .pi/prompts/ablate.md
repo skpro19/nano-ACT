@@ -13,7 +13,8 @@ provisioning, state updates, or cleanup through ad hoc shell commands.
 User arguments: `$ARGUMENTS`.
 
 - Require an explicit sweep spec path unless `--resume <iteration-id-or-dir>`
-  is supplied. Ask only if a required input is missing; never guess a config.
+  is supplied. `--resume` also accepts the short token `i<12 hex>` (the leading
+  `i` is optional). Ask only if a required input is missing; never guess a config.
 - Parse the spec path, optional `--branch`, `--expected-commit`, `--plan`, and `--resume`; reject other
   arguments. Pass paths as quoted arguments, not interpolated shell programs.
 - A normal invocation **always creates a new iteration**, even for identical
@@ -110,8 +111,8 @@ This verifies ownership before restarting only that iteration's dashboard
 sessions, downloads its recorded event files, and reuses its saved port/cache.
 It never provisions, launches training, reconciles outcomes, or removes instances.
 An unrelated occupied port blocks recovery; no unrelated service is stopped. The
-`/tb-s3` prompt wraps this recovery; pass an iteration ID or directory, or run it
-with no argument to choose from the saved dashboards.
+`/tb-s3` prompt wraps this recovery; pass an iteration ID, short token, or
+directory, or run it with no argument to choose from the saved dashboards.
 
 To stop a dashboard the user explicitly no longer wants:
 

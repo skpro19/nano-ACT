@@ -5,9 +5,10 @@ argument-hint: "[iteration-id-or-dir]"
 
 Restart a saved ablation iteration's shared TensorBoard server and S3
 synchronizer without running any training stage. The optional selector is
-`$ARGUMENTS`; it may be an iteration ID or a local iteration directory. This
-command never provisions, launches, reconciles, or destroys anything, and never
-steals an occupied port or stops an unrelated service.
+`$ARGUMENTS`; it may be an iteration ID, the short token `i<12 hex>` (the leading
+`i` is optional), or a local iteration directory. This command never provisions,
+launches, reconciles, or destroys anything, and never steals an occupied port or
+stops an unrelated service.
 
 ## Scope
 
@@ -30,9 +31,13 @@ required; this command does not run Git preflight.
    `.vast-train-local/ablations/` whose `manifest.json` has `"kind": "sweep"`
    and that already contains `tensorboard/service.json`. `--plan` iterations
    have no `service.json`, so they are not candidates.
-3. If `$ARGUMENTS` is non-empty, select the one candidate whose iteration ID or
-   resolved directory path exactly matches it. If it matches zero or several
-   candidates, report the valid iteration IDs and stop.
+3. If `$ARGUMENTS` is non-empty, resolve it to exactly one candidate: an
+   iteration ID (`YYYYMMDDTHHMMSSZ-<12 hex>`) matched exactly, a local iteration
+   directory path, or the short token `i<12 hex>` (the leading `i` is optional)
+   matched against the trailing hex of each candidate's iteration ID. If it
+   matches zero candidates, report the valid iteration IDs and stop. If a short
+   token matches several candidates, list their full iteration IDs and use the
+   `question` tool to ask which one to use; never guess.
 4. If `$ARGUMENTS` is empty, **always ask** with the `question` tool before doing
    anything else — even when only one candidate exists. Build one option per
    candidate, ordered newest first by iteration ID (`YYYYMMDDTHHMMSSZ-...` sorts

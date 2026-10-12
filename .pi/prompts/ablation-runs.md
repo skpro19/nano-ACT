@@ -4,9 +4,10 @@ argument-hint: "[iteration-id-or-dir]"
 ---
 
 Print a read-only list of an ablation iteration's runs. The optional selector is
-`$ARGUMENTS`: an iteration ID or a local iteration directory. This command never
-writes files, downloads artifacts, mutates state, or calls Vast, and never prints
-sensitive instance records.
+`$ARGUMENTS`: an iteration ID, the short token `i<12 hex>` (the leading `i` is
+optional), or a local iteration directory. This command never writes files,
+downloads artifacts, mutates state, or calls Vast, and never prints sensitive
+instance records.
 
 ## Select the iteration
 
@@ -15,9 +16,13 @@ sensitive instance records.
 2. List candidate iterations: every `<spec>/<iteration>/` under
    `.vast-train-local/ablations/` whose `manifest.json` has `"kind": "sweep"`.
    Include `--plan` iterations; they simply have no recorded run names yet.
-3. If a selector is present, select the one candidate whose iteration ID or
-   resolved directory path exactly matches it. If it matches zero or several
-   candidates, report the 5 most recent valid iteration IDs and stop.
+3. If a selector is present, resolve it to exactly one candidate: an iteration
+   ID matched exactly, a local iteration directory path, or the short token
+   `i<12 hex>` (the leading `i` is optional) matched against the trailing hex of
+   each candidate's iteration ID. If it matches zero candidates, report the 5
+   most recent valid iteration IDs and stop. If a short token matches several
+   candidates, list their full iteration IDs and use the `question` tool to ask
+   which one to use; never guess.
 4. If no selector is present, **always ask** with the `question` tool before
    doing anything else — even when only one candidate exists. Consider only the
    **5 most recent** candidates, ordered newest first by iteration ID

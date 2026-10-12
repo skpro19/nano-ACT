@@ -13,7 +13,8 @@ User arguments: `$ARGUMENTS`.
 
 Use an explicitly supplied config path, or a caller-provided `CONFIG_PATH`.
 Without either, ask for the path; no interactive picker or default config.
-An explicit `--resume <iteration-id-or-dir>` needs no original config. Support
+An explicit `--resume <iteration-id-or-dir>` needs no original config, and also
+accepts the short token `i<12 hex>` (the leading `i` is optional). Support
 `--plan` for config resolution/snapshotting without Vast/AWS operations; reject
 other arguments except optional `--branch <name>` and `--expected-commit <sha>`. Quote paths when constructing tool commands.
 
@@ -190,8 +191,8 @@ uv run --frozen --only-group train python \
 
 Refresh checks session ownership, restarts only that iteration's dashboard
 services, and retains its recorded port/cache. It does not reconcile outcomes.
-The `/tb-s3` prompt wraps this recovery; pass an iteration ID or directory, or run
-it with no argument to choose from the saved dashboards.
+The `/tb-s3` prompt wraps this recovery; pass an iteration ID, short token, or
+directory, or run it with no argument to choose from the saved dashboards.
 To stop only a selected sweep's server and synchronizer, use
 `ablation_tensorboard.py stop "$ITERATION_DIR"`. It checks both owners, preserves
 cache/logs and disables automatic dashboard restart on resume. Only explicit

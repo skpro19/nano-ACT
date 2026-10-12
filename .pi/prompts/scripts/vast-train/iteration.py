@@ -44,18 +44,27 @@ def new_directory(*, source: Path, root: Path = ROOT) -> Path:
 
 
 def locate(*, identity: str, root: Path = ROOT) -> Path:
-    # Accept an explicit iteration path or a globally unique iteration ID.
+    # Accept an explicit iteration path, a full iteration ID, or a globally
+    # unique short token (`i<12 hex>`; the leading `i` is optional).
     supplied = Path(identity).expanduser()
     if supplied.is_dir():
         directory = supplied.resolve()
         if not directory.is_relative_to(root.resolve()):
             raise Blocked("Resume path must be inside the local iteration root")
         return directory
-    if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", identity):
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", identity):
+        matches = list(root.glob(f"*/{identity}"))
+    elif token := re.fullmatch(r"i?([0-9a-f]{12})", identity):
+        suffix = token.group(1)
+        matches = sorted(path for path in root.glob("*/*")
+                         if path.is_dir() and path.name.rsplit("-", 1)[-1] == suffix)
+    else:
         raise Blocked("Invalid iteration ID/path")
-    matches = list(root.glob(f"*/{identity}"))
-    if len(matches) != 1:
-        raise Blocked("Iteration ID is missing or ambiguous; use its explicit directory")
+    if not matches:
+        raise Blocked("Iteration ID is missing; use its explicit directory")
+    if len(matches) > 1:
+        candidates = ", ".join(f"{path.parent.name}/{path.name}" for path in matches)
+        raise Blocked(f"Iteration ID is ambiguous; choose one of: {candidates}")
     return matches[0].resolve()
 
 

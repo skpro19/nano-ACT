@@ -223,6 +223,24 @@ class IterationTests(LocalFixture):
         with self.assertRaises(common.Blocked):
             iteration.locate(identity="../guess", root=root)
 
+    def test_short_token_locates_unique_iteration(self) -> None:
+        saved = self.make_iteration()
+        root = self.root / "iterations"
+        suffix = saved.directory.name.rsplit("-", 1)[1]
+        self.assertEqual(iteration.locate(identity=f"i{suffix}", root=root), saved.directory)
+        self.assertEqual(iteration.locate(identity=suffix, root=root), saved.directory)
+
+    def test_short_token_clash_lists_candidates(self) -> None:
+        first = self.make_iteration()
+        root = self.root / "iterations"
+        suffix = first.directory.name.rsplit("-", 1)[1]
+        clash = root / "other-spec" / f"20260101T000000Z-{suffix}"
+        clash.mkdir(parents=True)
+        with self.assertRaises(common.Blocked) as caught:
+            iteration.locate(identity=f"i{suffix}", root=root)
+        self.assertIn(first.directory.name, str(caught.exception))
+        self.assertIn(clash.name, str(caught.exception))
+
     def test_sweep_manifest_preserves_order_and_input_chain(self) -> None:
         group = self.root / "group"
         group.mkdir()
