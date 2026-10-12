@@ -21,6 +21,13 @@ Examples:
     uv run python scripts/utils/extract_filter_key_dataset.py \\
         --input datasets/can/ph/robomimic_can_ph_original_actions_agentview_robot0_eye_in_hand.hdf5 \\
         --filter-key 50_percent_train 50_percent_valid
+
+    # the MH operator-quality splits; the quality is already in the output stem, so
+    # strip it to get ..._train_90.hdf5 rather than ..._better_train_90.hdf5
+    uv run python scripts/utils/extract_filter_key_dataset.py \\
+        --input datasets/can/mh/original_actions/robomimic_can_mh_better_original_actions_agentview_robot0_eye_in_hand.hdf5 \\
+        --filter-key better_train better_valid better_operator_1_train better_operator_1_valid \\
+        --strip-prefix better_
 """
 
 from __future__ import annotations
@@ -53,15 +60,21 @@ def filtered_demo_names(*, dataset: h5py.File, filter_key: str) -> list[str]:
     return [name for name in sorted_demo_names(dataset=dataset) if name in tagged]
 
 
-def output_label(*, filter_key: str, num_demos: int) -> str:
+def output_label(*, filter_key: str, num_demos: int, strip_prefix: str = "") -> str:
     """Build the output filename label from a filter key and its demo count.
 
     The ``<N>_percent`` ablation token is dropped: a percentage reads like a split
     ratio and is redundant once the episode count is known, so ``50_percent_train``
     becomes ``train_90``. A key that is only a percentage (``50_percent``) becomes
     just the count.
+
+    ``strip_prefix`` removes a leading token that is already encoded elsewhere in the
+    output name (for example the operator quality in ``better_train``), so
+    ``better_operator_1_train`` with ``strip_prefix="better_"`` becomes
+    ``operator_1_train_45``.
     """
-    base = re.sub(r"\d+_percent", "", filter_key).strip("_")
+    base = filter_key[len(strip_prefix):] if strip_prefix and filter_key.startswith(strip_prefix) else filter_key
+    base = re.sub(r"\d+_percent", "", base).strip("_")
     return f"{base}_{num_demos}" if base else str(num_demos)
 
 
@@ -140,6 +153,15 @@ def parse_args() -> argparse.Namespace:
         help="mask/<filter-key> to materialize as its own hdf5 (one output file per key)",
     )
     parser.add_argument(
+        "--strip-prefix",
+        type=str,
+        default="",
+        help=(
+            "leading token removed from each filter key before the demo count is appended; "
+            "use this when that token is already encoded in the output name (e.g. better_)"
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
@@ -154,7 +176,9 @@ def main() -> None:
     with h5py.File(args.input, "r") as source_file:
         for filter_key in args.filter_key:
             num_demos = len(filtered_demo_names(dataset=source_file, filter_key=filter_key))
-            label = output_label(filter_key=filter_key, num_demos=num_demos)
+            label = output_label(
+                filter_key=filter_key, num_demos=num_demos, strip_prefix=args.strip_prefix
+            )
             output_path = default_output_path(input_path=args.input, label=label)
             if output_dir != args.input.parent:
                 output_path = output_dir / output_path.name
