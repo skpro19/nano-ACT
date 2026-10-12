@@ -3,6 +3,13 @@
 Reuses the validated posterior/matching helpers from the refined i526 audit so
 normalization, masking, sampling and donor selection keep identical semantics.
 Outputs land under debug/posterior-collapse/<iteration>/<checkpoint>/test-1/.
+
+Action representation (mode, action/proprio dimensions), training dataset and
+normalization are read from the checkpoint, so the runner covers both the
+original 8-D joint_position_aperture audit and the 7-D osc_pose_delta runs. When
+the training dataset is the ph100 file, the matching full file supplies a
+held-out-candidate split; any other dataset is reported as a single `train`
+split, because every demonstration in it was trained on.
 """
 from pathlib import Path
 import argparse
@@ -19,10 +26,15 @@ import h5py
 import numpy as np
 import torch
 
+from scripts.action_modes import resolve_checkpoint_representation, target_actions
+from scripts.dataset import build_proprio
+from scripts.models.act_v2.config import D_MODEL, N_HEAD, NUM_LAYERS, PROPRIO_DIMS, Z_DIMS
 from scripts.models.act_v2.model import ACTV2
 from scripts.utils.analyze_z import normalization_from_checkpoint
-from run_audit import gather, posterior_summary, tensor
+from run_audit import posterior_summary, tensor
 
+# Historical ph100/full pair; still imported by run_test4.py and used as the
+# default held-out relationship when a checkpoint records the ph100 dataset.
 TRAIN = Path('datasets/can/ph/2026-09-29_02-01-42_agentview_robot0_eye_in_hand_ph100.hdf5')
 FULL = Path('datasets/can/ph/2026-09-29_02-01-42_agentview_robot0_eye_in_hand.hdf5')
 SEEDS = (42, 123)
@@ -34,6 +46,7 @@ LOWDIM = tuple(f'{group}/{key}' for group in ('obs', 'next_obs')
 NEGLIGIBLE_VARIATION_SD = 0.02
 # Minimum future-action RMS for a "contrastive" observation-matched pair.
 CONTRASTIVE_ACTION_RMS = 0.05
+PH100_SUFFIX = '_ph100.hdf5'
 
 
 def file_hash(path):
@@ -48,6 +61,11 @@ def save_json(*, path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 
+def demo_names(hdf5):
+    """Demonstration names in numeric order (demo_2 before demo_10)."""
+    return sorted(hdf5['data'], key=lambda name: int(name.split('_')[-1]))
+
+
 def trajectory_hash(demo):
     digest = hashlib.sha256()
     for key in LOWDIM:
@@ -58,22 +76,42 @@ def trajectory_hash(demo):
     return digest.hexdigest()
 
 
-def build_splits():
-    """Training names from ph100; held-out candidate = full-file lowdim-disjoint complement."""
-    with h5py.File(TRAIN) as train, h5py.File(FULL) as full:
-        train_hashes = {name: trajectory_hash(train['data'][name]) for name in sorted(train['data'])}
-        full_hashes = {name: trajectory_hash(full['data'][name]) for name in sorted(full['data'])}
-        assert len(train_hashes) == 100 and len(full_hashes) == 200
-        assert all(full_hashes.get(name) == value for name, value in train_hashes.items())
-        held = sorted(set(full_hashes) - set(train_hashes))
-        assert not set(train_hashes.values()) & {full_hashes[name] for name in held}
-        return ({'train': sorted(train_hashes), 'held-out-candidate': held},
-                {'train_hashes': train_hashes, 'full_hashes': full_hashes,
-                 'held_out_candidate': held, 'hash_fields': LOWDIM,
-                 'status': 'candidate held-out; lowdim-disjoint; broader exposure unverified'})
+def build_splits(*, train_dataset, held_out_dataset):
+    """Train demos from the recorded dataset; optional lowdim-disjoint held-out complement."""
+    with h5py.File(train_dataset) as train:
+        train_names = demo_names(train)
+        train_hashes = {name: trajectory_hash(train['data'][name]) for name in train_names}
+    provenance = {'train_dataset': str(train_dataset), 'train_hashes': train_hashes,
+                  'train_demos': len(train_names), 'hash_fields': LOWDIM}
+    if held_out_dataset is None:
+        provenance['status'] = ('training demonstrations only; every demo in the recorded '
+                                'dataset was trained on, so no held-out split is claimed')
+        return {'train': train_names}, provenance
+    with h5py.File(held_out_dataset) as full:
+        full_hashes = {name: trajectory_hash(full['data'][name]) for name in demo_names(full)}
+    assert all(full_hashes.get(name) == value for name, value in train_hashes.items()), (
+        'training demonstrations are not identical in the held-out file')
+    held = [name for name in full_hashes if name not in train_hashes]
+    assert not set(train_hashes.values()) & {full_hashes[name] for name in held}
+    provenance.update({'held_out_dataset': str(held_out_dataset), 'full_hashes': full_hashes,
+                       'held_out_candidate': held,
+                       'status': 'candidate held-out; lowdim-disjoint; broader exposure unverified'})
+    return {'train': train_names, 'held-out-candidate': held}, provenance
 
 
-def sample_examples(*, hdf5, names, k, normalization, seed):
+def gather(*, demo, timestep, k, normalization, action_mode):
+    """One source action chunk in the checkpoint's own action representation."""
+    proprio = build_proprio(joint_pos=demo['obs/robot0_joint_pos'][timestep],
+                            gripper_qpos=demo['obs/robot0_gripper_qpos'][timestep])
+    actions = target_actions(demo=demo, action_mode=action_mode, start=timestep, stop=timestep + k)
+    valid = len(actions)
+    padded = np.zeros((k, actions.shape[-1]), dtype=np.float32)
+    padded[:valid] = actions
+    return (normalization.normalize_proprio(value=proprio),
+            normalization.normalize_action(value=padded), np.arange(k) < valid)
+
+
+def sample_examples(*, hdf5, names, k, normalization, action_mode, seed):
     """6 starts per demo; the first 2 per demo become intervention targets (refined audit)."""
     rng = np.random.default_rng(seed)
     ids, selected = [], []
@@ -85,7 +123,7 @@ def sample_examples(*, hdf5, names, k, normalization, seed):
         for timestep in times:
             ids.append((name, int(timestep)))
             proprio, action, mask = gather(demo=hdf5[f'data/{name}'], timestep=int(timestep),
-                                           k=k, normalization=normalization)
+                                           k=k, normalization=normalization, action_mode=action_mode)
             proprios.append(proprio)
             actions.append(action)
             masks.append(mask)
@@ -150,14 +188,15 @@ def observation_matching(*, proprios, actions, masks, demos, selected, seed):
 
 
 @torch.inference_mode()
-def run_posterior(*, model, checkpoint, checkpoint_sha, split, names, seed, destination):
+def run_posterior(*, model, checkpoint, checkpoint_sha, split, dataset, names, seed,
+                  action_mode, action_dims, destination):
     config = checkpoint['config']
     k = config['action_chunk_size']
     normalization = normalization_from_checkpoint(checkpoint=checkpoint)
-    dataset = TRAIN if split == 'train' else FULL
     with h5py.File(dataset) as hdf5:
         ids, selected, proprios, actions, masks = sample_examples(
-            hdf5=hdf5, names=names, k=k, normalization=normalization, seed=seed)
+            hdf5=hdf5, names=names, k=k, normalization=normalization,
+            action_mode=action_mode, seed=seed)
     mu, logvar = encode_posterior(model=model, proprios=proprios, actions=actions, masks=masks)
     sigma = np.exp(logvar / 2)
     demos = np.array([name for name, _ in ids])
@@ -169,6 +208,7 @@ def run_posterior(*, model, checkpoint, checkpoint_sha, split, names, seed, dest
                         valid_steps=masks.sum(1), **matching)
     save_json(path=destination / 'metadata.json', value={
         'split': split, 'seed': seed, 'dataset': str(dataset), 'k': k,
+        'action_mode': action_mode, 'action_dims': action_dims,
         'beta': config['beta'], 'lr': config['lr'], 'step': checkpoint['global_step'],
         'posterior_examples': len(ids), 'intervention_examples': len(selected),
         'posterior_padded': int((masks.sum(1) < k).sum()),
@@ -197,7 +237,11 @@ def summarize_split(*, files):
 
     mu, sigma, logvar, demo = joined('mu'), joined('sigma'), joined('logvar'), joined('demo')
     posterior = posterior_summary(mu=mu, sigma=sigma, logvar=logvar, demos=demo)
-    nn_mu_rms, nn_sigma_rms = pair_rms(mu=mu, sigma=sigma, source=joined('nn_source'))
+    # Pair rows with their own seed's donors before pooling; donor indices are seed-local.
+    nn_mu_rms = np.concatenate([pair_rms(mu=array['mu'], sigma=array['sigma'],
+                                         source=array['nn_source'])[0] for array in arrays])
+    nn_sigma_rms = np.concatenate([pair_rms(mu=array['mu'], sigma=array['sigma'],
+                                            source=array['nn_source'])[1] for array in arrays])
     nn = {'mu_rms': summarize_values(nn_mu_rms), 'sigma_rms': summarize_values(nn_sigma_rms),
           'proprio_rms': summarize_values(joined('nn_proprio_rms')),
           'future_action_rms': summarize_values(joined('nn_action_rms'))}
@@ -215,10 +259,11 @@ def summarize_split(*, files):
             'files': [str(file) for file in files]}
 
 
-def report(*, results, iteration, checkpoint, checkpoint_sha, train_commit):
+def report(*, results, iteration, checkpoint, checkpoint_sha, train_commit, action_mode, has_held_out):
     lines = ['# Test 1 — posterior variation', '',
              f'Iteration `{iteration}`, checkpoint `{checkpoint}` '
-             f'(sha256 `{checkpoint_sha[:16]}…`, training commit `{train_commit[:8]}`).', '',
+             f'(sha256 `{checkpoint_sha[:16]}…`, training commit `{train_commit[:8]}`, '
+             f'action mode `{action_mode}`).', '',
              '**Question:** does the encoder produce example-specific posterior distributions (`mu`, `sigma`)?',
              f'Variation is negligible when the 95% bootstrap CI of the max per-dimension SD is below '
              f'{NEGLIGIBLE_VARIATION_SD} latent units, present when its lower limit exceeds that value, otherwise uncertain. '
@@ -260,18 +305,56 @@ def report(*, results, iteration, checkpoint, checkpoint_sha, train_commit):
                   f"proprio RMS mean {contrastive['proprio_rms_mean']:.4g}, future-action RMS mean "
                   f"{contrastive['future_action_rms_mean']:.4g}, posterior `mu` RMS mean "
                   f"{contrastive['mu_rms']['mean']:.4g}, `sigma` RMS mean {contrastive['sigma_rms']['mean']:.4g}."]
-    lines += ['', '## Notes',
-              '- Per-dimension tables above are the combined-seed summaries; `results.json` keeps per-seed detail.',
-              '- Held-out-candidate is the full-file lowdim-disjoint complement, not certified unseen in all '
-              'previous experiments.',
-              '- This is a variation proxy, not a mutual-information or action-specificity measurement.']
-    return '\n'.join(lines) + '\n'
+    notes = ['', '## Notes',
+             '- Per-dimension tables above are the combined-seed summaries; `results.json` keeps per-seed detail.',
+             '- Held-out-candidate is the full-file lowdim-disjoint complement, not certified unseen in all '
+             'previous experiments.' if has_held_out else
+             '- Only a `train` split is reported: the checkpoint trained on every demonstration in its recorded '
+             'dataset, so no genuinely held-out split exists for this checkpoint.',
+             '- This is a variation proxy, not a mutual-information or action-specificity measurement.']
+    return '\n'.join(lines + notes) + '\n'
+
+
+def resolve_train_dataset(*, checkpoint, override):
+    recorded = (checkpoint.get('config') or {}).get('dataset')
+    dataset = override or (Path(recorded) if recorded else None)
+    if dataset is None:
+        raise ValueError('no dataset recorded in the checkpoint and no --dataset given')
+    if not dataset.exists():
+        raise FileNotFoundError(f'training dataset not found: {dataset}')
+    return dataset
+
+
+def resolve_held_out_dataset(*, train_dataset, override):
+    """Historical ph100 runs build the held-out candidate from the matching full file."""
+    if override is not None:
+        return override
+    if train_dataset.name.endswith(PH100_SUFFIX):
+        candidate = train_dataset.with_name(train_dataset.name[:-len(PH100_SUFFIX)] + '.hdf5')
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def build_model(*, checkpoint, representation):
+    config = checkpoint['config']
+    model = ACTV2(
+        d_model=D_MODEL, nhead=N_HEAD, num_layers=NUM_LAYERS, z_dims=Z_DIMS,
+        proprio_dims=PROPRIO_DIMS, action_dims=representation['action_dims'],
+        action_chunk_size=config['action_chunk_size'], use_z=True).cuda().eval()
+    model.load_state_dict(checkpoint['model'], strict=True)
+    model.action_representation = representation
+    return model
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--iteration', required=True)
     parser.add_argument('--checkpoint', type=Path, required=True)
+    parser.add_argument('--dataset', type=Path, default=None,
+                        help="training dataset; defaults to the checkpoint's recorded dataset")
+    parser.add_argument('--held-out-dataset', type=Path, default=None,
+                        help='optional full dataset used to build a held-out-candidate split')
     parser.add_argument('--output-root', type=Path, default=Path('debug/posterior-collapse'))
     parser.add_argument('--train-commit', default='')
     parser.add_argument('--force', action='store_true')
@@ -283,22 +366,28 @@ def main():
     checkpoint_sha = file_hash(args.checkpoint)
     (destination / 'checkpoint.sha256').write_text(f'{checkpoint_sha}  {args.checkpoint.name}\n')
 
-    splits, provenance = build_splits()
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    config = checkpoint['config']
+    assert config['use_z']
+    representation = resolve_checkpoint_representation(checkpoint=checkpoint)
+    train_dataset = resolve_train_dataset(checkpoint=checkpoint, override=args.dataset)
+    held_out_dataset = resolve_held_out_dataset(train_dataset=train_dataset,
+                                                override=args.held_out_dataset)
+
+    splits, provenance = build_splits(train_dataset=train_dataset, held_out_dataset=held_out_dataset)
     save_json(path=destination / 'provenance.json', value=provenance)
     save_json(path=destination / 'compatibility.json', value={
         'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
         'training_commit': args.train_commit,
         'act_v2_diff_vs_training_commit': subprocess.check_output(
             ['git', 'diff', args.train_commit, 'HEAD', '--', 'scripts/models/act_v2',
-             'scripts/dataset.py', 'scripts/utils/analyze_z.py'], text=True) if args.train_commit else None,
+             'scripts/dataset.py', 'scripts/action_modes.py', 'scripts/utils/analyze_z.py'],
+            text=True) if args.train_commit else None,
         'scope': 'evaluation code subset only'})
 
-    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-    config = checkpoint['config']
-    assert config['use_z']
     torch.manual_seed(42)
-    model = ACTV2(action_chunk_size=config['action_chunk_size'], use_z=True).cuda().eval()
-    model.load_state_dict(checkpoint['model'], strict=True)
+    model = build_model(checkpoint=checkpoint, representation=representation)
+    dataset_for_split = {'train': train_dataset, 'held-out-candidate': held_out_dataset}
 
     results = {}
     for split, names in splits.items():
@@ -311,14 +400,17 @@ def main():
                 continue
             print(f'START {split} seed={seed}', flush=True)
             run_posterior(model=model, checkpoint=checkpoint, checkpoint_sha=checkpoint_sha,
-                          split=split, names=names, seed=seed, destination=folder)
+                          split=split, dataset=dataset_for_split[split], names=names, seed=seed,
+                          action_mode=representation['mode'],
+                          action_dims=representation['action_dims'], destination=folder)
         results[split] = {'combined': summarize_split(files=files),
                           'by_seed': {str(seed): summarize_split(files=[file])
                                       for seed, file in zip(SEEDS, files)}}
     save_json(path=destination / 'results.json', value=results)
     (destination / 'summary.md').write_text(report(
         results=results, iteration=args.iteration, checkpoint=args.checkpoint.name,
-        checkpoint_sha=checkpoint_sha, train_commit=args.train_commit))
+        checkpoint_sha=checkpoint_sha, train_commit=args.train_commit,
+        action_mode=representation['mode'], has_held_out='held-out-candidate' in splits))
     print('COMPLETE test 1', flush=True)
 
 
