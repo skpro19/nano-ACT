@@ -70,11 +70,45 @@ class ResponseTests(unittest.TestCase):
         self.assertEqual(request.get_method(), "PUT")
         self.assertNotIn("test-secret-key", request.full_url)
         payload = json.loads(request.data)
-        self.assertEqual(payload["label"], LABEL)
-        self.assertEqual(payload["disk"], 100)
-        self.assertTrue(payload["cancel_unavail"])
-        self.assertEqual(payload["runtype"], "ssh_direc ssh_proxy")
-        self.assertEqual(payload["env"], {"-p 22:22": "1"})
+        expected_payload = {
+            "client_id": "me",
+            "image": common.IMAGE,
+            "disk": 100,
+            "env": {"-p 22:22": "1"},
+            "label": LABEL,
+            "runtype": "ssh_direc ssh_proxy",
+            "cancel_unavail": True,
+            "price": None,
+            "extra": None,
+            "onstart": None,
+            "image_login": None,
+            "jupyter_dir": None,
+            "template_hash_id": None,
+            "user": None,
+            "python_utf8": False,
+            "lang_utf8": False,
+            "use_jupyter_lab": False,
+            "force": False,
+        }
+        self.assertEqual(payload, expected_payload)
+        # Equality alone does not distinguish JSON booleans from 0/1 numbers.
+        for key, expected_value in expected_payload.items():
+            with self.subTest(key=key):
+                self.assertIs(type(payload[key]), type(expected_value))
+
+    def test_http_400_invalid_args_remains_unknown(self) -> None:
+        error = HTTPError("https://example.invalid/", 400, "error", {},
+                          io.BytesIO(b'{"success":false,"error":"invalid_args"}'))
+        opener = Mock()
+        opener.open.side_effect = error
+        with patch.dict(os.environ, {"VAST_API_KEY": "test-secret-key"}), \
+                patch.object(create_request, "build_opener", return_value=opener):
+            result = create_request.send_create(offer_id=42, label=LABEL)
+        self.assertEqual(result["outcome"], "unknown")
+        self.assertEqual(result["reason"], "http_error")
+        self.assertEqual(result["http_status"], 400)
+        self.assertEqual(result["provider_error_code"], "invalid_args")
+        opener.open.assert_called_once()
 
     def test_transport_errors_do_not_retry_or_leak_exception(self) -> None:
         for error in (URLError("secret-provider-token"), TimeoutError("secret-provider-token"),

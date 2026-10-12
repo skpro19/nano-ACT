@@ -73,8 +73,27 @@ def send_create(*, offer_id: int, label: str) -> dict:
         return {"outcome": "unknown", "reason": "missing_credentials"}
     # Vast CLI parse_env('-p 22:22') produces this explicit SSH mapping.
     # Without it, some rentals expose no ports['22/tcp'] in their API record.
-    payload = {"client_id": "me", "image": IMAGE, "disk": 100, "env": {"-p 22:22": "1"},
-               "label": label, "runtype": "ssh_direc ssh_proxy", "cancel_unavail": True}
+    # Keep the complete upstream create__instance envelope, including defaults.
+    payload = {
+        "client_id": "me",
+        "image": IMAGE,
+        "disk": 100,
+        "env": {"-p 22:22": "1"},
+        "label": label,
+        "runtype": "ssh_direc ssh_proxy",
+        "cancel_unavail": True,
+        "price": None,
+        "extra": None,
+        "onstart": None,
+        "image_login": None,
+        "jupyter_dir": None,
+        "template_hash_id": None,
+        "user": None,
+        "python_utf8": False,
+        "lang_utf8": False,
+        "use_jupyter_lab": False,
+        "force": False,
+    }
     request = Request(f"https://console.vast.ai/api/v0/asks/{offer_id}/",
                       data=json.dumps(payload).encode(), method="PUT",
                       headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
