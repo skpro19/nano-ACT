@@ -284,8 +284,18 @@ def scp_args(*, run: dict, source: Path, destination: str) -> list[str]:
             str(source), f"root@{run['host']}:{destination}"]
 
 
-def git_preflight(*, journal: Journal, expected: str | None = None) -> str:
-    args = ["bash", str(HELPERS / "git-preflight.sh")]
+def validate_branch(branch: str) -> str:
+    """Accept branch names, never option strings or arbitrary Git revisions."""
+    if (not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch)
+            or branch == "HEAD" or branch.startswith("refs/") or ".." in branch or "//" in branch
+            or any(part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))
+            or branch.endswith(("/", "."))):
+        raise Blocked("Invalid Git branch name")
+    return branch
+
+
+def git_preflight(*, journal: Journal, expected: str | None = None, branch: str = "act-v2") -> str:
+    args = ["bash", str(HELPERS / "git-preflight.sh"), "--branch", validate_branch(branch)]
     if expected is not None:
         args += ["--expected-commit", expected]
     result = journal.run(args=args, timeout=120, log_path=journal.directory / "preflight.log")

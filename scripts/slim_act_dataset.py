@@ -39,7 +39,7 @@ IMAGE_SUFFIX = "_image"
 PROPRIO_KEYS = ("robot0_joint_pos", "robot0_gripper_qpos")
 DEMO_ATTRS = ("num_samples", "ep_meta")
 SIM_REPLAY_DEMO_ATTRS = ("model_file", "camera_info")
-DATA_ATTRS = ("env_args",)
+DATA_ATTRS = ("env_args", "source_env_args", "supported_action_modes")
 DEFAULT_OUTPUT_SUFFIX = "_trimmed"
 
 
@@ -65,6 +65,8 @@ def copy_demo(
     keep_next_obs_images: bool,
     keep_sim_replay: bool) -> int:
     output_demo = output_group.create_group(demo_name)
+    if "actions" in source_demo:
+        copy_dataset(source=source_demo, output=output_demo, name="actions")
 
     output_obs = output_demo.create_group("obs")
     for key in (*image_keys(demo=source_demo), *PROPRIO_KEYS):
@@ -75,7 +77,8 @@ def copy_demo(
         for key in image_keys(demo=source_demo):
             copy_dataset(source=source_demo["next_obs"], output=output_next_obs, name=key)
     for key in PROPRIO_KEYS:
-        copy_dataset(source=source_demo["next_obs"], output=output_next_obs, name=key)
+        if f"next_obs/{key}" in source_demo:
+            copy_dataset(source=source_demo["next_obs"], output=output_next_obs, name=key)
 
     if keep_sim_replay:
         copy_dataset(source=source_demo, output=output_demo, name="states")

@@ -23,12 +23,7 @@ from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from scripts.dataset import CanPhDataset, NormalizationStats
-from scripts.models.act_v2.config import (
-    ACTION_CHUNK_SIZE,
-    JOINT_DIMS,
-    PROPRIO_DIMS,
-    Z_DIMS,
-)
+from scripts.action_checkpoint import validate_dataset_representation
 from scripts.models.act_v2.model import ACTV2
 from scripts.utils.analyze_z import load_model, make_subset_indices
 
@@ -169,6 +164,7 @@ def l1_metrics(
     baseline: np.ndarray,
     normalization: NormalizationStats,
 ) -> dict[str, float]:
+    arm_dims = len(normalization.action_mean) - 1
     normalized = np.abs(pred - baseline)
     physical = np.abs(
         denormalize_action(action=pred, normalization=normalization)
@@ -176,11 +172,11 @@ def l1_metrics(
     )
     return {
         "normalized_total": float(normalized.mean()),
-        "normalized_joint": float(normalized[..., :JOINT_DIMS].mean()),
-        "normalized_gripper": float(normalized[..., JOINT_DIMS:].mean()),
+        "normalized_arm": float(normalized[..., :arm_dims].mean()),
+        "normalized_gripper": float(normalized[..., arm_dims:].mean()),
         "physical_total": float(physical.mean()),
-        "physical_joint": float(physical[..., :JOINT_DIMS].mean()),
-        "physical_gripper": float(physical[..., JOINT_DIMS:].mean()),
+        "physical_arm": float(physical[..., :arm_dims].mean()),
+        "physical_gripper": float(physical[..., arm_dims:].mean()),
     }
 
 
@@ -264,16 +260,16 @@ def plot_action_change_hist(*, output_dir: Path, per_sample: dict[str, np.ndarra
 
 def plot_sensitivity_bar(*, output_dir: Path, metrics: dict[str, dict[str, float]]) -> None:
     names = sorted(metrics)
-    joint = [metrics[name]["physical_joint"] for name in names]
+    joint = [metrics[name]["physical_arm"] for name in names]
     gripper = [metrics[name]["physical_gripper"] for name in names]
 
     positions = np.arange(len(names))
     width = 0.4
     plt.figure(figsize=(8, 4))
-    plt.bar(positions - width / 2, joint, width, label="joint")
+    plt.bar(positions - width / 2, joint, width, label="arm targets (representation units)")
     plt.bar(positions + width / 2, gripper, width, label="gripper")
     plt.xticks(positions, names, rotation=30, ha="right")
-    plt.title("Mean physical action L1 vs z = 0")
+    plt.title("Mean denormalized action L1 vs z = 0")
     plt.ylabel("physical L1")
     plt.legend()
     plt.tight_layout()
@@ -324,8 +320,17 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device => {device}")
 
-    model, normalization = load_model(checkpoint_path=args.checkpoint, device=device)
-    dataset = CanPhDataset(file=str(args.dataset), k=ACTION_CHUNK_SIZE)
+    model, normalization, train_config = load_model(checkpoint_path=args.checkpoint, device=device)
+    dataset = CanPhDataset(
+        file=str(args.dataset), k=model.k,
+        image_keys=tuple((train_config or {}).get("image_keys", ["agentview_image"])),
+        action_mode=model.action_representation["mode"],
+    )
+    validate_dataset_representation(
+        dataset_representation=dataset.action_representation,
+        checkpoint_representation=model.action_representation,
+    )
+    dataset.normalization = normalization
 
     indices = make_subset_indices(num_samples=len(dataset), limit=args.limit, seed=args.seed)
     print(f"analyzing {len(indices)} / {len(dataset)} samples")

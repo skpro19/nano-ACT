@@ -42,15 +42,19 @@ class GitPreflightTest(unittest.TestCase):
     def push(self) -> None:
         self.git(cwd=self.repo, args=["push", "origin", "act-v2"])
 
-    def gate(self, *, expected: str | None = None, remote: Path | None = None) -> subprocess.CompletedProcess[str]:
-        args = ["bash", str(HELPER), "--remote-url", str(remote or self.remote)]
+    def gate(
+        self, *, expected: str | None = None, remote: Path | None = None,
+        branch: str = "act-v2") -> subprocess.CompletedProcess[str]:
+        args = ["bash", str(HELPER), "--remote-url", str(remote or self.remote), "--branch", branch]
         if expected is not None:
             args.extend(["--expected-commit", expected])
         return subprocess.run(
             args, cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
 
-    def assert_rejected(self, *, message: str, expected: str | None = None, remote: Path | None = None) -> None:
-        result = self.gate(expected=expected, remote=remote)
+    def assert_rejected(
+        self, *, message: str, expected: str | None = None,
+        remote: Path | None = None, branch: str = "act-v2") -> None:
+        result = self.gate(expected=expected, remote=remote, branch=branch)
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
         self.assertIn(message, result.stderr)
@@ -121,6 +125,36 @@ class GitPreflightTest(unittest.TestCase):
         self.commit()
         self.push()
         self.assert_rejected(message="Sweep pinned", expected=self.initial)
+
+    def publish_custom_branch(self) -> str:
+        branch = "feat/actions"
+        self.git(cwd=self.repo, args=["checkout", "-b", branch])
+        self.git(cwd=self.repo, args=["push", "origin", branch])
+        return branch
+
+    def test_custom_branch_clean_and_synced_passes(self) -> None:
+        branch = self.publish_custom_branch()
+        result = self.gate(branch=branch, expected=self.initial)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), self.initial)
+
+    def test_custom_branch_dirty_checkout_still_fails(self) -> None:
+        branch = self.publish_custom_branch()
+        (self.repo / "code.txt").write_text("modified\n")
+        self.assert_rejected(branch=branch, message="Working tree is dirty")
+
+    def test_custom_branch_unsynchronized_checkout_still_fails(self) -> None:
+        branch = self.publish_custom_branch()
+        (self.repo / "code.txt").write_text("ahead\n")
+        self.commit()
+        self.assert_rejected(branch=branch, message="ahead=1, behind=0")
+
+    def test_custom_branch_pinned_commit_mismatch_still_fails(self) -> None:
+        branch = self.publish_custom_branch()
+        (self.repo / "code.txt").write_text("next revision\n")
+        self.commit()
+        self.git(cwd=self.repo, args=["push", "origin", branch])
+        self.assert_rejected(branch=branch, expected=self.initial, message="Sweep pinned")
 
     def test_branch_tip_move_does_not_prevent_pinned_checkout(self) -> None:
         (self.repo / "code.txt").write_text("next revision\n")

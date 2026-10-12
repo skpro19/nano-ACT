@@ -169,7 +169,10 @@ def record_episode(
             )
             chunk_step = 0
 
-        sim_action = model_action_to_sim(model_action=action_chunk[chunk_step], obs=obs)
+        sim_action = model_action_to_sim(
+            model_action=action_chunk[chunk_step], obs=obs,
+            action_representation=getattr(model, "action_representation", None),
+        )
         obs, reward, done, info = env.step(sim_action)
         total_reward += float(reward)
         chunk_step += 1
@@ -232,6 +235,7 @@ def record_run(
         camera_names=camera_names,
         camera_height=IMG_DIMS[0],
         camera_width=IMG_DIMS[1],
+        action_representation=model.action_representation,
     )
     env = create_rollout_env(
         env_meta=env_meta,

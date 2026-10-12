@@ -69,7 +69,11 @@ class LatentLoggingTest(unittest.TestCase):
                 patch.object(train_v2.torch, "device", return_value=cpu),
                 patch.object(
                     train_v2, "CanPhDataset",
-                    return_value=SimpleNamespace(normalization=normalization),
+                    return_value=SimpleNamespace(
+                        normalization=normalization, action_dims=8,
+                        action_mode=train_v2.JOINT,
+                        action_representation=train_v2.representation_metadata(),
+                    ),
                 ),
                 patch.object(train_v2, "DataLoader", return_value=[batch]),
                 patch.object(train_v2, "ACTV2", return_value=model),

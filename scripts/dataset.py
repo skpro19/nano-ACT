@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 import h5py
 
 from scripts.models.act_v1.config import ACTION_CHUNK_SIZE, PROPRIO_DIMS
+from scripts.action_modes import JOINT, action_dims, preflight_dataset, target_actions
 
 
 NORMALIZATION_EPSILON = 1e-6
@@ -96,7 +97,7 @@ def validate_image_keys(*, hdf5: h5py.File, image_keys: tuple[str, ...]) -> None
                 )
 
 
-def compute_normalization_stats(*, hdf5: h5py.File) -> NormalizationStats:
+def compute_normalization_stats(*, hdf5: h5py.File, action_mode: str = JOINT) -> NormalizationStats:
     proprio_values = []
     action_values = []
 
@@ -111,10 +112,7 @@ def compute_normalization_stats(*, hdf5: h5py.File) -> NormalizationStats:
             )
         )
 
-        next_actions = build_action_chunk(
-            joint_pos=demo["next_obs/robot0_joint_pos"][:],
-            gripper_qpos=demo["next_obs/robot0_gripper_qpos"][:],
-        )
+        next_actions = target_actions(demo=demo, action_mode=action_mode)
         action_values.append(next_actions[:num_samples])
 
     proprio = np.concatenate(proprio_values, axis=0).astype(np.float64)
@@ -134,16 +132,22 @@ class CanPhDataset(Dataset):
         file: str,
         image_keys: tuple[str, ...],
         k: int = ACTION_CHUNK_SIZE,
-    ) -> None:
+        action_mode: str = JOINT,) -> None:
         self.file = file
         self.image_keys = image_keys
+        if not isinstance(k, int) or isinstance(k, bool) or k <= 0:
+            raise ValueError("k must be a positive integer")
         self.k = k
+        self.action_mode = action_mode
+        self.action_dims = action_dims(action_mode=action_mode)
         self._hdf5: h5py.File | None = None
         with h5py.File(file, "r") as hdf5:
-            validate_image_keys(hdf5=hdf5, image_keys=image_keys)
+            self.action_representation = preflight_dataset(
+                hdf5=hdf5, image_keys=image_keys, action_mode=action_mode,
+            )
             self.demo_num_timesteps = self._build_demo_num_timesteps(hdf5=hdf5)
             self.samples = self._build_sample_index(hdf5=hdf5)
-            self.normalization = compute_normalization_stats(hdf5=hdf5)
+            self.normalization = compute_normalization_stats(hdf5=hdf5, action_mode=action_mode)
 
     def _get_hdf5(self) -> h5py.File:
         # Open lazily so each DataLoader worker gets its own fork-safe handle.
@@ -186,32 +190,28 @@ class CanPhDataset(Dataset):
         joint_pos = demo["obs/robot0_joint_pos"][timestep]
         gripper_qpos = demo["obs/robot0_gripper_qpos"][timestep]
 
-        target_joint_pos = demo["next_obs/robot0_joint_pos"][timestep : timestep + self.k]
-        target_gripper_qpos = demo["next_obs/robot0_gripper_qpos"][timestep : timestep + self.k]
-
         proprio = build_proprio(joint_pos=joint_pos, gripper_qpos=gripper_qpos)
-        target_actions = build_action_chunk(
-            joint_pos=target_joint_pos,
-            gripper_qpos=target_gripper_qpos,
+        actions = target_actions(
+            demo=demo, action_mode=self.action_mode, start=timestep, stop=timestep + self.k,
         )
 
-        if target_actions.shape[0] < self.k:
-            pad = np.zeros((1, PROPRIO_DIMS), dtype=np.float32)
-            diff = self.k - target_actions.shape[0]
-            target_actions = np.concatenate(
-                [target_actions, np.repeat(pad, repeats=diff, axis=0)],
+        if actions.shape[0] < self.k:
+            pad = np.zeros((1, self.action_dims), dtype=np.float32)
+            diff = self.k - actions.shape[0]
+            actions = np.concatenate(
+                [actions, np.repeat(pad, repeats=diff, axis=0)],
                 axis=0,
             )
 
         if proprio.shape != (PROPRIO_DIMS,):
             raise ValueError(f"expected proprio shape ({PROPRIO_DIMS},), got {proprio.shape}")
-        if target_actions.shape != (self.k, PROPRIO_DIMS):
+        if actions.shape != (self.k, self.action_dims):
             raise ValueError(
-                f"expected target_actions shape ({self.k}, {PROPRIO_DIMS}), got {target_actions.shape}"
+                f"expected target_actions shape ({self.k}, {self.action_dims}), got {actions.shape}"
             )
 
         proprio = self.normalization.normalize_proprio(value=proprio)
-        target_actions = self.normalization.normalize_action(value=target_actions)
+        actions = self.normalization.normalize_action(value=actions)
 
         action_mask = torch.ones(self.k)
         N = self.demo_num_timesteps[demo_name]
@@ -224,7 +224,7 @@ class CanPhDataset(Dataset):
         return {
             "images": images_to_tensor(images=image_frames),
             "proprio": torch.from_numpy(proprio).unsqueeze(0),
-            "target_actions": torch.from_numpy(target_actions),
+            "target_actions": torch.from_numpy(actions),
             "demo_name": demo_name,
             "timestep": timestep,
             "action_mask": action_mask

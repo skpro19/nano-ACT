@@ -26,6 +26,8 @@ from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from scripts.dataset import CanPhDataset, NormalizationStats
+from scripts.action_modes import resolve_checkpoint_representation, validate_normalization
+from scripts.action_checkpoint import validate_dataset_representation
 from scripts.models.act_v2.config import (
     ACTION_CHUNK_SIZE,
     D_MODEL,
@@ -64,6 +66,8 @@ def normalization_from_checkpoint(*, checkpoint: dict) -> NormalizationStats:
     if "normalization" not in checkpoint:
         raise KeyError("checkpoint is missing 'normalization' stats")
     stats = checkpoint["normalization"]
+    representation = resolve_checkpoint_representation(checkpoint=checkpoint)
+    validate_normalization(stats=stats, action_mode=representation["mode"])
     return NormalizationStats(
         proprio_mean=np.asarray(stats["proprio_mean"], dtype=np.float32),
         proprio_std=np.asarray(stats["proprio_std"], dtype=np.float32),
@@ -86,16 +90,19 @@ def load_model(*, checkpoint_path: Path, device: torch.device) -> tuple[ACTV2, N
     if train_config is not None:
         use_z = bool(train_config.get("use_z", True))
     action_chunk_size = int((train_config or {}).get("action_chunk_size", ACTION_CHUNK_SIZE))
+    representation = resolve_checkpoint_representation(checkpoint=checkpoint)
     model = ACTV2(
         d_model=D_MODEL,
         nhead=N_HEAD,
         num_layers=NUM_LAYERS,
         z_dims=Z_DIMS,
         proprio_dims=PROPRIO_DIMS,
+        action_dims=representation["action_dims"],
         action_chunk_size=action_chunk_size,
         use_z=use_z,
     )
     model.load_state_dict(checkpoint["model"])
+    model.action_representation = representation
     model.to(device=device)
     model.eval()
     normalization = normalization_from_checkpoint(checkpoint=checkpoint)
@@ -343,10 +350,15 @@ def main() -> None:
         raise ValueError("latent analysis requires a checkpoint with use_z=True")
     image_keys = (train_config or {}).get("image_keys", ["agentview_image"])
     dataset = CanPhDataset(
-        file=str(args.dataset), k=model.k,
+        file=str(args.dataset),
+        action_mode=model.action_representation["mode"], k=model.k,
         image_keys=tuple(str(key) for key in image_keys),
     )
     # Analyze inputs using the scaling the checkpoint was trained with.
+    validate_dataset_representation(
+        dataset_representation=dataset.action_representation,
+        checkpoint_representation=model.action_representation,
+    )
     dataset.normalization = normalization
 
     indices = make_subset_indices(num_samples=len(dataset), limit=args.limit, seed=args.seed)

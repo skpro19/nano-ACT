@@ -31,6 +31,7 @@ import argparse
 import importlib.util
 import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -42,6 +43,10 @@ import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.file_utils as FileUtils
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.action_modes import JOINT, OSC, verify_osc_metadata
 EXTRACTION_SCRIPT = (
     REPO_ROOT / "third_party" / "robomimic" / "robomimic" / "scripts" / "dataset_states_to_obs.py"
 )
@@ -220,6 +225,8 @@ def write_demo(
 ) -> int:
     ep_group = output_group.create_group(demo_name)
     ep_group.create_dataset("states", data=np.array(traj["states"]))
+    # Preserve the original controller commands, never reconstructed pose differences.
+    source_demo.copy("actions", ep_group, name="actions")
     write_obs_group(
         group=ep_group, prefix="obs", obs_dict=traj["obs"], obs_keys=obs_keys, compress=compress
     )
@@ -250,6 +257,8 @@ def extract_act_dataset(
     num_demos: int | None,
     compress: bool,
 ) -> None:
+    if input_path.resolve() == output_path.resolve():
+        raise ValueError("output path must differ from input path")
     extraction = load_extraction_module()
     written_obs_keys = obs_keys(cameras=cameras)
 
@@ -317,6 +326,18 @@ def extract_act_dataset(
 
         data_group.attrs["total"] = total_samples
         data_group.attrs["env_args"] = json.dumps(env.serialize(), indent=4)
+        # env.serialize() may regenerate controller defaults. Keep source semantics
+        # independently, rather than treating the rendering environment as evidence.
+        source_meta = source_file["data"].attrs.get("source_env_args", source_file["data"].attrs["env_args"])
+        data_group.attrs["source_env_args"] = source_meta
+        supported = [JOINT]
+        try:
+            verify_osc_metadata(env_meta=json.loads(source_meta))
+        except ValueError:
+            pass
+        else:
+            supported.append(OSC)
+        data_group.attrs["supported_action_modes"] = json.dumps(supported)
 
     print(f"wrote {len(demo_names)} demos ({total_samples} samples) to {output_path}")
 

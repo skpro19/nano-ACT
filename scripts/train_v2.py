@@ -20,6 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from scripts.dataset import CanPhDataset, NormalizationStats
+from scripts.action_modes import JOINT, OSC, action_dims, representation_metadata
 from scripts.models.act_v2.config import (
     D_MODEL,
     IMG_DIMS,
@@ -130,6 +131,7 @@ RUN_NAME_OMIT_KEYS = frozenset({
     "rollout",
     "version",
     "base_config",
+    "action_mode",
     "description",
     "name",
 })
@@ -150,6 +152,9 @@ DATASET_TIMESTAMP_PREFIX = re.compile(
 
 
 def validate_config(*, config: dict) -> dict:
+    config = dict(config)
+    config.setdefault("action_mode", JOINT)
+    action_dims(action_mode=config["action_mode"])
     missing = [key for key in CONFIG_KEYS if key not in config]
     if missing:
         raise KeyError(f"config missing required keys: {missing}")
@@ -391,6 +396,8 @@ def format_dataset(*, dataset: str) -> str:
 
 def render_config_fields(*, config: dict) -> list[str]:
     parts: list[str] = []
+    if config.get("action_mode", JOINT) != JOINT:
+        parts.append(config["action_mode"])
     handled_keys: set[str] = set(RUN_NAME_OMIT_KEYS)
     for key, label, template in RUN_NAME_FIELDS:
         if key not in config:
@@ -508,17 +515,25 @@ def save_checkpoint(
     model: ACTV2,
     loss_running_avg: float,
     normalization: NormalizationStats) -> None:
+    representation = getattr(model, "action_representation", representation_metadata())
+    stored_config = dict(config)
+    stored_config.setdefault("action_mode", representation["mode"])
+    if stored_config["action_mode"] != representation["mode"]:
+        raise ValueError("model representation disagrees with training config action_mode")
+    if getattr(model, "action_dims", representation["action_dims"]) != representation["action_dims"]:
+        raise ValueError("model action dimensions disagree with checkpoint representation")
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "run_name": run_name,
-            "config": dict(config),
+            "config": stored_config,
             "dataset": dataset,
             "epoch": epoch,
             "global_step": global_step,
             "model": model.state_dict(),
             "loss_running_avg": loss_running_avg,
             "normalization": normalization.as_checkpoint_dict(),
+            "action_representation": representation,
         },
         path,
     )
@@ -601,6 +616,7 @@ def evaluate_and_log_checkpoint(
                     camera_names=camera_names,
                     camera_height=IMG_DIMS[0],
                     camera_width=IMG_DIMS[1],
+                    action_representation=getattr(model, "action_representation", None),
                 )
                 env = create_rollout_env(env_meta=env_meta, on_screen=False, write_video=False)
 
@@ -722,6 +738,11 @@ def train(
 
     seed_everything(seed=seed)
 
+    can_ph_dataset = CanPhDataset(
+        file=str(dataset), image_keys=tuple(config["image_keys"]),
+        k=action_chunk_size, action_mode=config.get("action_mode", JOINT),
+    )
+
     if not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA is required for training but PyTorch could not initialize it. "
@@ -729,11 +750,6 @@ def train(
         )
     device = torch.device("cuda")
 
-    can_ph_dataset = CanPhDataset(
-        file=str(dataset),
-        image_keys=tuple(config["image_keys"]),
-        k=action_chunk_size,
-    )
     dataloader_generator = make_dataloader_generator(seed=seed)
     can_ph_dataloader = DataLoader(
         dataset=can_ph_dataset,
@@ -755,7 +771,12 @@ def train(
         proprio_dims=PROPRIO_DIMS,
         action_chunk_size=action_chunk_size,
         use_z=config["use_z"],
+        action_dims=can_ph_dataset.action_dims,
     ).to(device=device)
+    model.action_representation = can_ph_dataset.action_representation
+    arm_dims = 6 if can_ph_dataset.action_mode == OSC else JOINT_DIMS
+    arm_metric = "osc_input_pose" if can_ph_dataset.action_mode == OSC else "joint"
+    gripper_metric = "gripper_command" if can_ph_dataset.action_mode == OSC else "gripper"
 
     action_loss_kind = config["action_loss"]
     action_loss_fn = make_action_loss_fn(action_loss=action_loss_kind)
@@ -915,22 +936,22 @@ def train(
                     valid_action_steps = action_mask > 0
                     pred_physical = pred_physical[valid_action_steps]
                     target_physical = target_physical[valid_action_steps]
-                    pred_joint = pred_physical[..., :JOINT_DIMS]
-                    pred_gripper = pred_physical[..., JOINT_DIMS:]
-                    target_joint = target_physical[..., :JOINT_DIMS]
-                    target_gripper = target_physical[..., JOINT_DIMS:]
+                    pred_arm = pred_physical[..., :arm_dims]
+                    pred_gripper = pred_physical[..., arm_dims:]
+                    target_arm = target_physical[..., :arm_dims]
+                    target_gripper = target_physical[..., arm_dims:]
 
                 if log_denorm_l1:
-                    batch_l1_joint = denorm_l1_fn(pred_joint, target_joint).item()
+                    batch_l1_arm = denorm_l1_fn(pred_arm, target_arm).item()
                     batch_l1_gripper = denorm_l1_fn(pred_gripper, target_gripper).item()
 
                 if log_ranges:
-                    pred_joint_min = pred_joint.min().item()
-                    pred_joint_max = pred_joint.max().item()
+                    pred_arm_min = pred_arm.min().item()
+                    pred_arm_max = pred_arm.max().item()
                     pred_gripper_min = pred_gripper.min().item()
                     pred_gripper_max = pred_gripper.max().item()
-                    target_joint_min = target_joint.min().item()
-                    target_joint_max = target_joint.max().item()
+                    target_arm_min = target_arm.min().item()
+                    target_arm_max = target_arm.max().item()
                     target_gripper_min = target_gripper.min().item()
                     target_gripper_max = target_gripper.max().item()
 
@@ -963,17 +984,26 @@ def train(
             if log_lr:
                 writer.add_scalar("optimizer/lr", learning_rate, global_step)
             if log_denorm_l1:
-                writer.add_scalar("denorm_l1/joint", batch_l1_joint, global_step)
-                writer.add_scalar("denorm_l1/gripper", batch_l1_gripper, global_step)
+                writer.add_scalar(f"denorm_l1/{arm_metric}", batch_l1_arm, global_step)
+                if can_ph_dataset.action_mode == OSC:
+                    writer.add_scalar(
+                        "denorm_l1/osc_translation_input",
+                        denorm_l1_fn(pred_arm[..., :3], target_arm[..., :3]).item(), global_step,
+                    )
+                    writer.add_scalar(
+                        "denorm_l1/osc_rotation_input",
+                        denorm_l1_fn(pred_arm[..., 3:6], target_arm[..., 3:6]).item(), global_step,
+                    )
+                writer.add_scalar(f"denorm_l1/{gripper_metric}", batch_l1_gripper, global_step)
             if log_ranges:
-                writer.add_scalar("ranges/pred_min_joint", pred_joint_min, global_step)
-                writer.add_scalar("ranges/pred_max_joint", pred_joint_max, global_step)
-                writer.add_scalar("ranges/pred_min_gripper", pred_gripper_min, global_step)
-                writer.add_scalar("ranges/pred_max_gripper", pred_gripper_max, global_step)
-                writer.add_scalar("ranges/target_min_joint", target_joint_min, global_step)
-                writer.add_scalar("ranges/target_max_joint", target_joint_max, global_step)
-                writer.add_scalar("ranges/target_min_gripper", target_gripper_min, global_step)
-                writer.add_scalar("ranges/target_max_gripper", target_gripper_max, global_step)
+                writer.add_scalar(f"ranges/pred_min_{arm_metric}", pred_arm_min, global_step)
+                writer.add_scalar(f"ranges/pred_max_{arm_metric}", pred_arm_max, global_step)
+                writer.add_scalar(f"ranges/pred_min_{gripper_metric}", pred_gripper_min, global_step)
+                writer.add_scalar(f"ranges/pred_max_{gripper_metric}", pred_gripper_max, global_step)
+                writer.add_scalar(f"ranges/target_min_{arm_metric}", target_arm_min, global_step)
+                writer.add_scalar(f"ranges/target_max_{arm_metric}", target_arm_max, global_step)
+                writer.add_scalar(f"ranges/target_min_{gripper_metric}", target_gripper_min, global_step)
+                writer.add_scalar(f"ranges/target_max_{gripper_metric}", target_gripper_max, global_step)
             if log_latent:
                 writer.add_scalar("latent/mu_norm", mu_norm, global_step)
                 writer.add_scalar("latent/mu_rms", mu_rms, global_step)

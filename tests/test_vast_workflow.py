@@ -104,7 +104,7 @@ class LocalFixture(unittest.TestCase):
         self.directory = iteration.new_directory(source=self.source, root=self.root / "iterations")
         self.journal = common.Journal(directory=self.directory)
 
-    def make_iteration(self) -> iteration.Iteration:
+    def make_iteration(self, *, branch: str = "act-v2") -> iteration.Iteration:
         def resolve(**kwargs):
             args = kwargs["args"]
             target = Path(args[args.index("--out") + 1])
@@ -112,7 +112,7 @@ class LocalFixture(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, str(target), "")
         with patch.object(iteration, "git_preflight", return_value=COMMIT), \
                 patch.object(self.journal, "run", side_effect=resolve):
-            iteration.create(directory=self.directory, source=self.source, kind="single", journal=self.journal)
+            iteration.create(directory=self.directory, source=self.source, kind="single", journal=self.journal, branch=branch)
         return iteration.Iteration(directory=self.directory)
 
 
@@ -279,7 +279,7 @@ class IterationTests(LocalFixture):
         historical = self.root / "ablate-example.state"
         historical.write_text("stalled ancient-run\n")
         fresh = iteration.new_directory(source=self.source, root=self.root / "iterations")
-        args = argparse.Namespace(spec=None, config=self.source, resume=None, expected_commit=None, plan=True)
+        args = argparse.Namespace(spec=None, config=self.source, resume=None, expected_commit=None, branch=None, plan=True)
         def create_fixture(**kwargs):
             # Use the same fixture-building mechanism in the fresh directory.
             original = self.directory
@@ -302,7 +302,7 @@ class IterationTests(LocalFixture):
         self.make_iteration()
         self.source.unlink()
         args = argparse.Namespace(spec=None, config=self.source, resume=self.directory.name,
-                                  expected_commit=None, plan=False)
+                                  expected_commit=None, branch=None, plan=False)
         with patch.object(workflow, "parse_args", return_value=args), \
                 patch.object(workflow, "locate", return_value=self.directory), \
                 patch.object(workflow, "execute") as execute, contextlib.redirect_stdout(io.StringIO()):
@@ -311,7 +311,7 @@ class IterationTests(LocalFixture):
 
     def test_interruption_records_state_while_lock_is_held(self) -> None:
         self.make_iteration()
-        args = argparse.Namespace(spec=None, config=None, resume=self.directory.name, expected_commit=None, plan=False)
+        args = argparse.Namespace(spec=None, config=None, resume=self.directory.name, expected_commit=None, branch=None, plan=False)
         def interrupt(saved):
             with self.assertRaises(common.Blocked):
                 with common.lock(self.directory / "driver.lock"):

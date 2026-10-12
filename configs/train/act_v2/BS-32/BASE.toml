@@ -1,5 +1,7 @@
 version = "v4"
 action_chunk_size = 10
+# Optional: "osc_pose_delta" requires original actions and verified source metadata.
+action_mode = "joint_position_aperture"
 action_loss = "l1"
 batch_size = 32
 steps = 100000

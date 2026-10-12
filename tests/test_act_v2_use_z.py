@@ -40,6 +40,7 @@ class LatentSwitchTest(unittest.TestCase):
                 num_layers=1,
                 z_dims=2,
                 proprio_dims=3,
+                action_dims=3,
                 action_chunk_size=2,
                 use_z=use_z,
             ).eval()

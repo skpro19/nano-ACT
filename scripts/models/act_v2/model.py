@@ -22,14 +22,15 @@ from scripts.models.act_v2.z_encoder import ZEncoder
 
 class ACTV2(nn.Module):
 
-    def __init__(self, 
+    def __init__(self, *,
                 d_model:int =D_MODEL, 
                 nhead:int =N_HEAD, 
                 num_layers:int =NUM_LAYERS,
                 z_dims:int = Z_DIMS,
                 proprio_dims:int = PROPRIO_DIMS, 
                 action_chunk_size:int = ACTION_CHUNK_SIZE,
-                use_z: bool = True):
+                use_z: bool = True,
+                action_dims: int = 8) -> None:
 
         super().__init__()
 
@@ -39,6 +40,7 @@ class ACTV2(nn.Module):
         self.num_layers = num_layers
         self.z_dims = z_dims
         self.proprio_dims = proprio_dims
+        self.action_dims = action_dims
         self.k = action_chunk_size
         
         # Keep CVAE modules registered even when use_z=False so checkpoints
@@ -49,7 +51,7 @@ class ACTV2(nn.Module):
                                         z_dims=self.z_dims)
 
         self.proprio_encoder    = ProprioEncoder(d_model=self.d_model, proprio_dims=self.proprio_dims)
-        self.action_encoder     = ActionEncoder(d_model=self.d_model, action_dims=self.proprio_dims)
+        self.action_encoder     = ActionEncoder(d_model=self.d_model, action_dims=self.action_dims)
         self.z_encoder          = ZEncoder(d_model=self.d_model, z_dims=self.z_dims)
         self.image_encoder      = ImageEncoder(d_model=self.d_model)
 
@@ -64,7 +66,7 @@ class ACTV2(nn.Module):
                                                     num_layers=self.num_layers)
         
         self.cls = nn.Parameter(torch.randn(1,self.d_model))
-        self.action_head = nn.Linear(self.d_model, self.proprio_dims)
+        self.action_head = nn.Linear(self.d_model, self.action_dims)
 
     def posterior(
         self,

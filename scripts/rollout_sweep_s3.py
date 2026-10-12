@@ -10,8 +10,8 @@ uploads the run's artifacts to ``s3://<bucket>/rollouts/<version>/<run-name>/``:
 - ``success_rate.png``: the success-rate curve across epochs.
 
 The run's ``config.json`` is copied from ``runs/<version>/<run-name>/`` and
-uploaded once; its ``config.use_z`` value decides whether the act_v2 decoder
-runs with or without the latent ``z``.
+uploaded once for provenance. Each checkpoint supplies its own latent, camera,
+action chunk and controller settings; environments are not shared between checkpoints.
 
 Checkpoints are downloaded one at a time and deleted after evaluation, so disk
 usage stays bounded regardless of run length. The results and curve are
@@ -39,14 +39,7 @@ import torch
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 
-from scripts.models.act_v1.config import IMG_DIMS
-from scripts.rollout import (
-    DEFAULT_IMAGE_KEYS,
-    close_env,
-    configure_renderer,
-    create_rollout_env,
-    make_rollout_env_meta,
-)
+from scripts.rollout import configure_renderer
 from scripts.rollout_sweep import (
     evaluate_checkpoint,
     parse_epoch_checkpoint,
@@ -55,6 +48,8 @@ from scripts.rollout_sweep import (
 )
 
 DEFAULT_VERSION = "act_v2"
+# Retained for callers of the historical config-inspection helper only.
+DEFAULT_IMAGE_KEYS = ("agentview_image",)
 DEFAULT_DATASET = Path("datasets/can/ph/2026-09-19_03-14-50_act_agentview.hdf5")
 CONFIG_FILENAME = "config.json"
 ARTIFACT_FILENAMES = ("results.json", "results.npz", "success_rate.png")
@@ -94,6 +89,8 @@ def parse_args() -> argparse.Namespace:
         help="number of evaluation episodes per checkpoint",
     )
     parser.add_argument("--horizon", type=int, default=250, help="max steps per episode")
+    parser.add_argument("--n-action-steps", type=int, required=True,
+                        help="actions executed before replanning (must fit each checkpoint chunk)")
     parser.add_argument("--seed", type=int, default=0, help="random seed for env resets")
     parser.add_argument(
         "--dataset",
@@ -223,7 +220,8 @@ def sweep_run(
     run_name: str,
     client: Any,
     device: torch.device,
-    env) -> dict[str, int]:
+    env=None) -> dict[str, int]:
+    """Evaluate a run; the legacy env argument is ignored to prevent controller reuse."""
     checkpoint_prefix = f"checkpoints/{args.version}/{run_name}"
     config_key = f"runs/{args.version}/{run_name}/{CONFIG_FILENAME}"
     output_prefix = f"rollouts/{args.version}/{run_name}"
@@ -251,8 +249,10 @@ def sweep_run(
     metadata = {
         "run_name": run_name,
         "version": args.version,
-        "use_z": use_z,
-        "image_keys": list(image_keys),
+        "run_config_use_z": use_z,
+        "run_config_image_keys": list(image_keys),
+        "rollout_settings_source": "each checkpoint config and action_representation",
+        "n_action_steps": args.n_action_steps,
         "seed": args.seed,
         "n_rollouts": args.n_rollouts,
         "horizon": args.horizon,
@@ -284,17 +284,16 @@ def sweep_run(
             try:
                 summary = evaluate_checkpoint(
                     checkpoint=local_checkpoint,
-                    env=env,
+                    dataset_path=args.dataset,
                     device=device,
                     model_version=args.version,
-                    use_z=use_z,
-                    image_keys=image_keys,
                     n_rollouts=args.n_rollouts,
                     horizon=args.horizon,
                     terminate_on_success=args.terminate_on_success,
                     on_screen=args.on_screen,
                     reset_seed_base=args.seed,
                     progress=progress,
+                    n_action_steps=args.n_action_steps,
                 )
             except Exception as error:
                 failures.append(
@@ -358,29 +357,14 @@ def main() -> None:
     else:
         args.workspace = Path(tempfile.mkdtemp(prefix="rollout-sweep-"))
 
-    env_meta = make_rollout_env_meta(
-        dataset_path=args.dataset,
-        camera_height=IMG_DIMS[0],
-        camera_width=IMG_DIMS[1],
-    )
-    env = create_rollout_env(
-        env_meta=env_meta,
-        on_screen=args.on_screen,
-        write_video=False,
-    )
-
     summaries: dict[str, dict[str, int]] = {}
-    try:
-        for run_name in args.run_name:
-            summaries[run_name] = sweep_run(
-                args=args,
-                run_name=run_name,
-                client=client,
-                device=device,
-                env=env,
-            )
-    finally:
-        close_env(env)
+    for run_name in args.run_name:
+        summaries[run_name] = sweep_run(
+            args=args,
+            run_name=run_name,
+            client=client,
+            device=device,
+        )
 
     print("rollout sweep summary")
     for run_name, summary in summaries.items():

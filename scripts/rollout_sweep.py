@@ -35,12 +35,16 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from scripts.models.act_v1.config import IMG_DIMS
+from scripts.models.act_v2.config import IMG_DIMS
+from scripts.action_modes import resolve_checkpoint_representation
 from scripts.rollout import (
     DEFAULT_DATASET,
     DEFAULT_HORIZON,
-    DEFAULT_IMAGE_KEYS,
+    camera_names_from_image_keys,
     close_env,
+    load_checkpoint,
+    rollout_settings_from_checkpoint,
+    validate_n_action_steps,
     configure_renderer,
     create_rollout_env,
     load_model,
@@ -68,14 +72,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-version",
         choices=("act_v1", "act_v2"),
-        default="act_v1",
+        default="act_v2",
         help="checkpoint model architecture",
     )
     parser.add_argument(
         "--use-z",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="act_v2: decode with latent z (use --no-use-z for no-z checkpoints)",
+        default=None,
+        help="optional assertion of checkpoint use_z; settings are read from each checkpoint",
     )
     parser.add_argument(
         "--n-rollouts",
@@ -101,8 +105,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--image-keys",
         nargs="+",
-        default=list(DEFAULT_IMAGE_KEYS),
-        help="observation image keys fed to the model, in camera order",
+        default=None,
+        help="optional assertion of checkpoint image keys; camera order comes from each checkpoint",
     )
     parser.add_argument(
         "--terminate-on-success",
@@ -127,7 +131,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="keep going if a checkpoint rollout fails",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.model_version != "act_v2":
+        parser.error("act_v1 sweeps are no longer supported; use scripts/train_v2.py checkpoints with --model-version act_v2")
+    return args
 
 
 def parse_epoch_checkpoint(*, path: Path) -> int | None:
@@ -151,27 +158,43 @@ def select_checkpoints(*, checkpoint_dir: Path) -> list[tuple[int, Path]]:
 def evaluate_checkpoint(
     *,
     checkpoint: Path,
-    env,
+    dataset_path: Path,
     device: torch.device,
-    model_version: str,
-    use_z: bool,
-    image_keys: tuple[str, ...],
+    model_version: str = "act_v2",
+    use_z: bool | None = None,
+    image_keys: tuple[str, ...] | None = None,
     n_rollouts: int,
     horizon: int,
     terminate_on_success: bool,
     on_screen: bool,
     reset_seed_base: int,
     n_action_steps: int,
-    progress: tqdm,
-) -> dict[str, float | int]:
-    model, normalization = load_model(
-        checkpoint_path=checkpoint,
-        device=device,
-        model_version=model_version,
-        use_z=use_z,
+    progress: tqdm,) -> dict[str, float | int]:
+    if model_version != "act_v2":
+        raise ValueError("act_v1 sweeps are unsupported; use scripts/train_v2.py checkpoints")
+    payload = load_checkpoint(checkpoint_path=checkpoint, device=device)
+    checkpoint_use_z, checkpoint_images, action_chunk_size = rollout_settings_from_checkpoint(checkpoint=payload)
+    if use_z is not None and use_z != checkpoint_use_z:
+        raise ValueError("--use-z disagrees with checkpoint config; omit the override")
+    if image_keys is not None and image_keys != checkpoint_images:
+        raise ValueError("--image-keys disagrees with checkpoint config; omit the override")
+    image_keys = checkpoint_images
+    representation = resolve_checkpoint_representation(checkpoint=payload)
+    validate_n_action_steps(values=[n_action_steps], action_chunk_size=action_chunk_size)
+    env_meta = make_rollout_env_meta(
+        dataset_path=dataset_path,
+        camera_names=camera_names_from_image_keys(image_keys=image_keys),
+        camera_height=IMG_DIMS[0], camera_width=IMG_DIMS[1],
+        action_representation=representation,
     )
+    model, normalization = load_model(
+        checkpoint=payload, device=device, use_z=checkpoint_use_z,
+        action_chunk_size=action_chunk_size,
+    )
+    env = None
     rollouts: list[dict[str, float | int | bool]] = []
     try:
+        env = create_rollout_env(env_meta=env_meta, on_screen=on_screen, write_video=False)
         for rollout_idx in range(n_rollouts):
             np.random.seed(reset_seed_base + rollout_idx)
             rollout_stats = run_rollout(
@@ -186,6 +209,7 @@ def evaluate_checkpoint(
                 video_writer=None,
                 video_skip=1,
                 n_action_steps=n_action_steps,
+                action_chunk_size=action_chunk_size,
             )
             rollouts.append(rollout_stats)
             progress.set_postfix(
@@ -194,6 +218,8 @@ def evaluate_checkpoint(
             )
             progress.update(1)
     finally:
+        if env is not None:
+            close_env(env)
         del model
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -291,17 +317,6 @@ def main() -> None:
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    env_meta = make_rollout_env_meta(
-        dataset_path=args.dataset,
-        camera_height=IMG_DIMS[0],
-        camera_width=IMG_DIMS[1],
-    )
-    env = create_rollout_env(
-        env_meta=env_meta,
-        on_screen=args.on_screen,
-        write_video=False,
-    )
-
     print(
         f"sweep: {len(checkpoints)} checkpoints x {args.n_rollouts} rollouts "
         f"= {len(checkpoints) * args.n_rollouts} episodes"
@@ -322,11 +337,11 @@ def main() -> None:
             try:
                 summary = evaluate_checkpoint(
                     checkpoint=checkpoint,
-                    env=env,
+                    dataset_path=args.dataset,
                     device=device,
                     model_version=args.model_version,
                     use_z=args.use_z,
-                    image_keys=tuple(args.image_keys),
+                    image_keys=tuple(args.image_keys) if args.image_keys is not None else None,
                     n_rollouts=args.n_rollouts,
                     horizon=args.horizon,
                     terminate_on_success=args.terminate_on_success,
@@ -352,7 +367,6 @@ def main() -> None:
             )
     finally:
         progress.close()
-        close_env(env)
 
     if results:
         output_dir.mkdir(parents=True, exist_ok=True)

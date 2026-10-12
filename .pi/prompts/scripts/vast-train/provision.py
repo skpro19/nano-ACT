@@ -200,7 +200,7 @@ def network_gate(*, journal: Journal, run: dict, directory: Path) -> bool:
 
 
 def provision(*, journal: Journal, combo: dict, directory: Path,
-              commit: str, save: Callable[[], None]) -> dict:
+              commit: str, save: Callable[[], None], branch: str = "act-v2") -> dict:
     if combo.get("provisional_abandon_requested"):
         raise Blocked("Provisional abandonment is pending; repeat abandon_provisional.py, not provisioning")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -214,7 +214,7 @@ def provision(*, journal: Journal, combo: dict, directory: Path,
             combo.pop("run_dir", None)
             combo.pop("instance_id", None)
             offer = search_offers(journal=journal, directory=directory, excluded=excluded)[0]
-            git_preflight(journal=journal, expected=commit)
+            git_preflight(journal=journal, expected=commit, branch=branch)
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
             active = {"label": f"toy-act-train-actv2-{timestamp}-{uuid.uuid4().hex[:12]}", "offer": offer,
                       "status": "create_requested", "created_at": now()}

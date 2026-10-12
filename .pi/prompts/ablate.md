@@ -1,6 +1,6 @@
 ---
 description: Run a fresh, logged Vast.ai sweep; explicitly resume an iteration
-argument-hint: "<sweep-spec> [--plan] [--resume <iteration-id>]"
+argument-hint: "<sweep-spec> [--branch <name>] [--expected-commit <sha>] [--plan] [--resume <iteration-id>]"
 ---
 
 Run an ACT v2 sweep using the committed driver:
@@ -14,7 +14,7 @@ User arguments: `$ARGUMENTS`.
 
 - Require an explicit sweep spec path unless `--resume <iteration-id-or-dir>`
   is supplied. Ask only if a required input is missing; never guess a config.
-- Parse the spec path, optional `--plan`, and optional `--resume`; reject other
+- Parse the spec path, optional `--branch`, `--expected-commit`, `--plan`, and `--resume`; reject other
   arguments. Pass paths as quoted arguments, not interpolated shell programs.
 - A normal invocation **always creates a new iteration**, even for identical
   configs. Never search for old `.state`/`.commit` files, reuse an older
@@ -27,14 +27,27 @@ User arguments: `$ARGUMENTS`.
 ```bash
 uv run --frozen python .pi/prompts/scripts/vast-train/workflow.py \
   --spec "$SWEEP_SPEC"
+# If explicitly supplied, add --branch "$BRANCH"; otherwise fresh runs use act-v2.
 # Add --plan for a local plan, or --resume "$ITERATION_ID" for explicit recovery.
 # Resume without an original spec: workflow.py --resume "$ITERATION_ID"
 ```
 
 The driver performs Git preflight before resolving project configs, then
 rechecks the pinned revision before provisioning/setup/launch. Require a clean,
-anonymously synchronized `act-v2` checkout. Never automatically stash, commit,
+anonymously synchronized checkout of the selected branch (fresh default: `act-v2`).
+Resume inherits the immutable saved branch and SHA; an explicit different
+`--branch` is rejected before execution. Legacy iterations without a branch use
+`act-v2` without rewriting historical manifests or watcher snapshots. Custom
+branches must already be checked out, clean and anonymously published. Artifact
+prefixes remain `act_v2` regardless of branch. Never automatically stash, commit,
 push, pull, reset, switch branches, or bypass a failed check.
+
+Local datasets are validated before renting with the shared action-mode
+preflight across every demo and selected image key; absent `action_mode` means
+joint targets. OSC requires actions and valid controller metadata. S3-only
+sources retain the existence check, then receive the same preflight remotely,
+with size/hash/camera checks before launch. Missing helpers in pinned code fail
+clearly rather than weakening validation. `--plan` does not inspect S3 or rent.
 
 ## Execution contract
 

@@ -8,6 +8,10 @@ from pathlib import Path
 import h5py
 from scripts.train_v2 import load_config
 from scripts.rollout import camera_names_from_image_keys
+try:
+    from scripts.action_modes import JOINT, preflight_dataset
+except ImportError as error:
+    raise RuntimeError('Pinned code lacks scripts.action_modes.preflight_dataset; publish a compatible revision') from error
 config = load_config(path=Path('.vast-train/train-config.toml'))
 camera_names_from_image_keys(image_keys=tuple(config['image_keys']))
 path = Path(config['dataset'])
@@ -19,10 +23,7 @@ if os.environ.get('EXPECTED_SHA'):
             checksum.update(block)
     assert checksum.hexdigest() == os.environ['EXPECTED_SHA'], 'Dataset SHA-256 mismatch'
 with h5py.File(path, 'r') as dataset:
-    demos = list(dataset['data'].keys())
-    assert demos, 'Empty dataset'
-    for demo in demos:
-        for key in config['image_keys']:
-            assert key in dataset['data'][demo]['obs'], f'Missing {key} in {demo}'
-print('Dataset size/hash/cameras verified')
+    preflight_dataset(hdf5=dataset, image_keys=tuple(config['image_keys']),
+                      action_mode=config.get('action_mode', JOINT))
+print('Dataset size/hash/cameras/action representation verified')
 PY

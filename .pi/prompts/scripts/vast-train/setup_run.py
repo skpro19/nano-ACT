@@ -14,7 +14,7 @@ import tomllib
 
 from workflow_common import (
     Blocked, HELPERS, PROFILE, REGION, REPO, Journal, atomic_write, digest,
-    instances, scp_args, ssh_args, write_env, write_json,
+    instances, scp_args, ssh_args, validate_branch, write_env, write_json,
 )
 
 
@@ -62,9 +62,18 @@ from scripts.train_v2 import load_config
 from scripts.rollout import camera_names_from_image_keys
 c = load_config(path=Path(sys.argv[1]))
 camera_names_from_image_keys(image_keys=tuple(c['image_keys']))
+path = Path(c['dataset'])
+if path.is_file():
+    import h5py
+    try:
+        from scripts.action_modes import JOINT, preflight_dataset
+    except ImportError as error:
+        raise RuntimeError('Pinned code lacks scripts.action_modes.preflight_dataset; publish a compatible revision') from error
+    with h5py.File(path, 'r') as dataset:
+        preflight_dataset(hdf5=dataset, image_keys=tuple(c['image_keys']), action_mode=c.get('action_mode', JOINT))
 """
     journal.run(args=["uv", "run", "--frozen", "python", "-c", code, str(config_path)],
-                timeout=120, log_path=journal.directory / "preflight.log")
+                timeout=1800, log_path=journal.directory / "preflight.log")
 
 
 def transfer_credentials(*, journal: Journal, run: dict) -> None:
@@ -164,12 +173,17 @@ def allocate_lease(*, journal: Journal, run: dict) -> dict:
 
 
 def setup(*, journal: Journal, combo: dict, config_path: Path,
-          commit: str, save: Callable[[], None]) -> None:
+          commit: str, save: Callable[[], None], branch: str = "act-v2") -> None:
+    branch = validate_branch(branch)
     run = combo["run"]
     run_dir = Path(run["run_dir"])
     config = tomllib.loads(config_path.read_text())
     log_path = run_dir / "setup.log"
-    script = f"export GIT_COMMIT={shlex.quote(commit)}\n" + (HELPERS / "remote-setup.sh").read_text()
+    script = (
+        f"export GIT_COMMIT={shlex.quote(commit)}\n"
+        f"export GIT_BRANCH={shlex.quote(branch)}\n"
+        + (HELPERS / "remote-setup.sh").read_text()
+    )
     journal.run(args=ssh_args(run=run, command="bash -s"), input_text=script, timeout=2400, log_path=log_path)
     journal.run(args=scp_args(run=run, source=config_path, destination="/workspace/toy-act/.vast-train/train-config.toml"),
                 timeout=120, log_path=log_path)
@@ -180,7 +194,7 @@ def setup(*, journal: Journal, combo: dict, config_path: Path,
     values = {
         "REPO": str(REPO), "INSTANCE_ID": run["instance_id"], "INSTANCE_LABEL": run["label"],
         "SSH_HOST": run["host"], "SSH_PORT": run["port"], "SSH_KNOWN_HOSTS": run["known_hosts"],
-        "GIT_COMMIT": commit, "OFFER_ID": run["offer"]["id"], "MACHINE_ID": run["offer"]["machine_id"],
+        "GIT_COMMIT": commit, "GIT_BRANCH": branch, "OFFER_ID": run["offer"]["id"], "MACHINE_ID": run["offer"]["machine_id"],
         "OFFER_DPH_TOTAL": run["offer"]["dph_total"], "ACTUAL_DPH_TOTAL": run["actual_price"],
         "CONFIG_SLUG": config["name"], "RUN_NAME": "", "RESOLVED_CONFIG": str(config_path), "DATASET_PATH": config["dataset"],
         "CHECKPOINT_EVERY": config["checkpoint_every"], "STEPS": config["steps"],

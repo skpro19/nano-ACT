@@ -23,7 +23,7 @@ from provision import provision
 from setup_run import (
     ensure_forwarding, ensure_watcher, handoff, launch, local_preflight, setup, validate_dataset_source,
 )
-from workflow_common import Blocked, Journal, atomic_write, git_preflight, instances, lock
+from workflow_common import Blocked, Journal, atomic_write, git_preflight, instances, lock, validate_branch
 
 
 def watcher_alive(run_dir: Path) -> bool:
@@ -120,7 +120,7 @@ def execute(iteration: Iteration) -> None:
         return
     # Existing monitoring/reconciliation is possible even after a branch advances.
     # Every additional provisioning/setup/launch still requires the pinned revision.
-    git_preflight(journal=journal, expected=iteration.manifest["git_commit"])
+    git_preflight(journal=journal, expected=iteration.manifest["git_commit"], branch=iteration.branch)
     local_preflight(journal)
     ensure_dashboard(iteration)
     total = len(iteration.state["combos"])
@@ -132,20 +132,20 @@ def execute(iteration: Iteration) -> None:
         iteration.validate()
         config_path = iteration.directory / entry["config"]
         if combo["status"] in {"pending", "provisioning", "setup"}:
-            git_preflight(journal=journal, expected=iteration.manifest["git_commit"])
+            git_preflight(journal=journal, expected=iteration.manifest["git_commit"], branch=iteration.branch)
             validate_dataset_source(journal=journal, config=tomllib.loads(config_path.read_text()), config_path=config_path)
         if combo["status"] in {"pending", "provisioning"}:
             journal.set_stage(text=f"{label}: provisioning and hardware/network checks")
             provision(journal=journal, combo=combo, directory=iteration.directory / "combos" / combo["id"],
-                      commit=iteration.manifest["git_commit"], save=iteration.save)
+                      commit=iteration.manifest["git_commit"], branch=iteration.branch, save=iteration.save)
         if combo["status"] == "setup":
             journal.set_stage(text=f"{label}: remote setup and dataset validation")
-            git_preflight(journal=journal, expected=iteration.manifest["git_commit"])
+            git_preflight(journal=journal, expected=iteration.manifest["git_commit"], branch=iteration.branch)
             setup(journal=journal, combo=combo, config_path=config_path,
-                  commit=iteration.manifest["git_commit"], save=iteration.save)
+                  commit=iteration.manifest["git_commit"], branch=iteration.branch, save=iteration.save)
         if combo["status"] == "ready_to_launch":
             journal.set_stage(text=f"{label}: launching training and monitoring")
-            git_preflight(journal=journal, expected=iteration.manifest["git_commit"])
+            git_preflight(journal=journal, expected=iteration.manifest["git_commit"], branch=iteration.branch)
             launch(journal=journal, combo=combo, save=iteration.save)
         elif combo["status"] == "awaiting_handoff":
             journal.set_stage(text=f"{label}: restoring monitoring")
@@ -173,6 +173,7 @@ def parse_args() -> argparse.Namespace:
     source.add_argument("--spec", type=Path)
     source.add_argument("--config", type=Path)
     parser.add_argument("--resume", help="explicit iteration ID or local iteration directory")
+    parser.add_argument("--branch", help="Git branch (fresh: act-v2; resume: saved branch)")
     parser.add_argument("--expected-commit", help="optional caller-pinned Git SHA")
     parser.add_argument("--plan", action="store_true", help="resolve/snapshot only; no Vast/AWS operations")
     args = parser.parse_args()
@@ -182,6 +183,11 @@ def parse_args() -> argparse.Namespace:
         parser.error("--plan creates a new iteration; use --resume without --plan to launch it")
     if args.expected_commit and not re.fullmatch(r"[0-9a-f]{40,64}", args.expected_commit):
         parser.error("--expected-commit must be a full hexadecimal Git SHA")
+    if args.branch is not None:
+        try:
+            validate_branch(args.branch)
+        except Blocked as error:
+            parser.error(str(error))
     return args
 
 
@@ -210,8 +216,10 @@ def main() -> int:
                 if not args.resume:
                     journal.set_stage(text="Git preflight and immutable config resolution")
                     create(directory=directory, source=source, kind="sweep" if args.spec else "single",
-                           journal=journal, expected_commit=args.expected_commit)
+                           journal=journal, expected_commit=args.expected_commit, branch=args.branch or "act-v2")
                 iteration = Iteration(directory=directory)
+                if args.branch is not None and args.branch != iteration.branch:
+                    raise Blocked("Caller branch differs from the saved iteration")
                 journal.progress(text=f"Combos: {len(iteration.state['combos'])}; mode: {'plan' if args.plan else 'resume' if args.resume else 'fresh'}")
                 if args.resume and source is not None and str(source) != iteration.manifest["source"]:
                     raise Blocked("Resume source path differs; saved configs must not be substituted")

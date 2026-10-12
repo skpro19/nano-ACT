@@ -80,6 +80,10 @@ def merge_datasets(*, first_path: Path, second_path: Path, output_path: Path) ->
                 f"  second: {env_args_second}"
             )
 
+        for key in ("source_env_args", "supported_action_modes"):
+            if first_file["data"].attrs.get(key) != second_file["data"].attrs.get(key):
+                raise ValueError(f"datasets have different {key}; cannot merge action semantics")
+
         first_demos = sorted_demo_names(dataset=first_file)
         second_demos = sorted_demo_names(dataset=second_file)
         offset = len(first_demos)
@@ -103,6 +107,9 @@ def merge_datasets(*, first_path: Path, second_path: Path, output_path: Path) ->
 
             data_group.attrs["total"] = total_samples
             data_group.attrs["env_args"] = env_args_first
+            for key in ("source_env_args", "supported_action_modes"):
+                if key in first_file["data"].attrs:
+                    data_group.attrs[key] = first_file["data"].attrs[key]
 
     print(f"first:  {first_path} ({len(first_demos)} demos)")
     print(f"second: {second_path} ({len(second_demos)} demos)")

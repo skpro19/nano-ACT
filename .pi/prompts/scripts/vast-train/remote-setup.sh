@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Idempotent setup for a provisional instance. GIT_COMMIT is provided on stdin.
+# Idempotent setup. GIT_COMMIT and GIT_BRANCH are provided on stdin.
 # No cleanup traps; local workflow state owns recovery after interruption.
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
 export DEBIAN_FRONTEND=noninteractive
 PROJECT=/workspace/toy-act
+: "${GIT_BRANCH:?Selected Git branch is required}"
+git check-ref-format --branch "$GIT_BRANCH" >/dev/null
 if [ ! -d "$PROJECT/.git" ]; then
   test ! -e "$PROJECT" || { echo 'Existing non-clone project directory; refusing replacement' >&2; exit 2; }
-  git clone --branch act-v2 --single-branch https://github.com/skpro19/toy-act.git "$PROJECT"
+  git clone --branch "$GIT_BRANCH" --single-branch https://github.com/skpro19/toy-act.git "$PROJECT"
 fi
 # Never change code after a training launch.
 if [ -e "$PROJECT/.vast-train/state/run-status" ] || tmux has-session -t train 2>/dev/null; then

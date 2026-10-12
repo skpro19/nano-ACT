@@ -8,7 +8,7 @@ import tomllib
 import uuid
 
 from workflow_common import (
-    Blocked, REPO, Journal, atomic_write, atomic_write_bytes, digest, git_preflight, now, write_json,
+    Blocked, REPO, Journal, atomic_write, atomic_write_bytes, digest, git_preflight, now, validate_branch, write_json,
 )
 
 ROOT = REPO / ".vast-train-local/ablations"
@@ -60,8 +60,9 @@ def locate(*, identity: str, root: Path = ROOT) -> Path:
 
 
 def create(*, directory: Path, source: Path, kind: str, journal: Journal,
-           expected_commit: str | None = None) -> dict:
-    commit = git_preflight(journal=journal, expected=expected_commit)
+           expected_commit: str | None = None, branch: str = "act-v2") -> dict:
+    branch = validate_branch(branch)
+    commit = git_preflight(journal=journal, expected=expected_commit, branch=branch)
     paths = input_paths(source=source, kind=kind)
     snapshots = []
     for index, path in enumerate(paths):
@@ -106,9 +107,10 @@ def create(*, directory: Path, source: Path, kind: str, journal: Journal,
         combos.append({"id": f"{index:04d}", "slug": path.stem, "name": name,
                        "config": str(path.relative_to(directory)), "sha256": digest(path)})
     manifest = {"version": 1, "id": directory.name, "kind": kind, "source": str(source),
-                "created_at": now(), "git_commit": commit, "inputs": snapshots, "combos": combos}
+                "created_at": now(), "git_commit": commit, "git_branch": branch, "inputs": snapshots, "combos": combos}
     write_json(path=directory / "manifest.json", value=manifest)
-    state = {"version": 1, "manifest_sha256": digest(directory / "manifest.json"), "driver_status": "created",
+    state = {"version": 1, "manifest_sha256": digest(directory / "manifest.json"),
+             "git_commit": commit, "git_branch": branch, "driver_status": "created",
              "combos": [{"id": combo["id"], "status": "pending", "attempts": []} for combo in combos]}
     write_json(path=directory / "state.json", value=state)
     journal.event(kind="iteration_created", iteration=directory.name, combos=len(combos), git_commit=commit)
@@ -124,6 +126,10 @@ class Iteration:
         self.state = json.loads((directory / "state.json").read_text())
         self.validate()
 
+    @property
+    def branch(self) -> str:
+        return validate_branch(self.manifest.get("git_branch", "act-v2"))
+
     def validate(self) -> None:
         if self.manifest.get("version") != 1 or self.state.get("version") != 1:
             raise Blocked("Unsupported iteration state version")
@@ -131,6 +137,13 @@ class Iteration:
             raise Blocked("Iteration manifest was modified")
         if not re.fullmatch(r"[0-9a-f]{40,64}", self.manifest["git_commit"]):
             raise Blocked("Invalid saved revision")
+        branch = self.branch
+        if "git_branch" in self.manifest:
+            if self.state.get("git_branch") != branch or self.state.get("git_commit") != self.manifest["git_commit"]:
+                raise Blocked("State and manifest Git identity differ")
+        elif (self.state.get("git_branch", "act-v2") != branch
+              or self.state.get("git_commit", self.manifest["git_commit"]) != self.manifest["git_commit"]):
+            raise Blocked("State and legacy manifest Git identity differ")
         ids = [combo["id"] for combo in self.manifest["combos"]]
         if len(set(ids)) != len(ids) or ids != [combo["id"] for combo in self.state["combos"]]:
             raise Blocked("State and manifest combo lists differ")
@@ -177,7 +190,7 @@ class Iteration:
 
     def summary(self) -> str:
         rows = [f"Iteration: {self.directory.name}", f"Directory: {self.directory}",
-                f"Commit: {self.manifest['git_commit']}", f"Driver: {self.state['driver_status']}",
+                f"Branch: {self.branch}", f"Commit: {self.manifest['git_commit']}", f"Driver: {self.state['driver_status']}",
                 "combo  status                instance  tensorboard / run directory"]
         dashboard = self.state.get("tensorboard", {})
         if dashboard:

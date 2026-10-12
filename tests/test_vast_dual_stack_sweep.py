@@ -68,7 +68,8 @@ class DualStackSweepTests(unittest.TestCase):
                     self.fail(f"Unexpected external command: {args[0]}")
                 return subprocess.CompletedProcess(args, 0, output, "")
 
-            def configure(*, journal, combo, config_path, commit, save) -> None:
+            def configure(*, journal, combo, config_path, commit, branch, save) -> None:
+                self.assertEqual(branch, "act-v2")
                 self.assertEqual(combo["run"]["host"], "8.8.8.8")
                 self.assertEqual(combo["run"]["port"], 3028)
                 self.assertTrue(Path(combo["run"]["known_hosts"]).exists())

@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import random
 import copy
+
 import json
 import os
 import time
@@ -28,6 +29,10 @@ import imageio
 import numpy as np
 import torch
 
+from scripts.action_modes import (
+    OSC, bounded_osc_command, resolve_checkpoint_representation,
+    validate_normalization, verify_osc_metadata,
+)
 from scripts.dataset import NormalizationStats, build_proprio, image_to_tensor
 from scripts.models.act_v2.config import (
     ACTION_CHUNK_SIZE,
@@ -144,7 +149,15 @@ def initialize_obs_modalities() -> None:
     )
 
 
-def make_rollout_controller_config() -> dict:
+def make_rollout_controller_config(*, action_representation: dict | None = None) -> dict:
+    if action_representation is not None and action_representation["mode"] == OSC:
+        source = verify_osc_metadata(env_meta=action_representation["source_env_args"])
+        config = copy.deepcopy(source["env_kwargs"]["controller_configs"])
+        arm = config.get("body_parts", {}).get("right", config)
+        # Translate a verified legacy delta flag for robosuite 1.5's API.
+        arm["input_type"] = "delta"
+        return config
+
     from robosuite.controllers import load_composite_controller_config
 
     controller_config = load_composite_controller_config(controller="BASIC", robot="Panda")
@@ -195,14 +208,22 @@ def make_rollout_env_meta(
     camera_names: tuple[str, ...],
     camera_height: int,
     camera_width: int,
-) -> dict:
+    action_representation: dict | None = None,) -> dict:
     import robomimic.utils.env_utils as EnvUtils
     import robomimic.utils.file_utils as FileUtils
 
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=str(dataset_path))
     env_meta = copy.deepcopy(env_meta)
+    if action_representation is not None and action_representation["mode"] == OSC:
+        env_meta = verify_osc_metadata(env_meta=action_representation["source_env_args"])
     env_kwargs = env_meta["env_kwargs"]
-    env_kwargs["controller_configs"] = make_rollout_controller_config()
+    env_kwargs["controller_configs"] = make_rollout_controller_config(action_representation=action_representation)
+    if action_representation is not None and action_representation["mode"] == OSC:
+        source_kwargs = action_representation["source_env_args"]["env_kwargs"]
+        env_kwargs["control_freq"] = source_kwargs["control_freq"]
+        for key in ("robots", "gripper_types"):
+            if key in source_kwargs:
+                env_kwargs[key] = copy.deepcopy(source_kwargs[key])
     env_kwargs["use_camera_obs"] = True
     env_kwargs["camera_names"] = list(camera_names)
     env_kwargs["camera_heights"] = camera_height
@@ -288,7 +309,9 @@ def normalization_from_checkpoint(*, checkpoint: dict) -> NormalizationStats:
             "checkpoint is missing 'normalization' stats; use a checkpoint saved by "
             "scripts/train_v2.py"
         )
+    representation = resolve_checkpoint_representation(checkpoint=checkpoint)
     stats = checkpoint["normalization"]
+    validate_normalization(stats=stats, action_mode=representation["mode"])
     return NormalizationStats(
         proprio_mean=np.asarray(stats["proprio_mean"], dtype=np.float32),
         proprio_std=np.asarray(stats["proprio_std"], dtype=np.float32),
@@ -304,6 +327,8 @@ def load_model(
     use_z: bool,
     action_chunk_size: int = ACTION_CHUNK_SIZE,
 ) -> tuple[ACTV2, NormalizationStats]:
+    representation = resolve_checkpoint_representation(checkpoint=checkpoint)
+    normalization = normalization_from_checkpoint(checkpoint=checkpoint)
     model = ACTV2(
         d_model=D_MODEL,
         nhead=N_HEAD,
@@ -311,14 +336,15 @@ def load_model(
         z_dims=Z_DIMS,
         action_chunk_size=action_chunk_size,
         proprio_dims=PROPRIO_DIMS,
+        action_dims=representation["action_dims"],
         use_z=use_z,
     )
     if "model" not in checkpoint:
         raise KeyError("checkpoint is missing 'model' state dict")
     model.load_state_dict(checkpoint["model"])
+    model.action_representation = representation
     model.to(device=device)
     model.eval()
-    normalization = normalization_from_checkpoint(checkpoint=checkpoint)
     return model, normalization
 
 
@@ -376,7 +402,9 @@ def gripper_command(*, target_aperture: float, current_aperture: float) -> float
     return 0.0
 
 
-def model_action_to_sim(*, model_action: np.ndarray, obs: dict) -> np.ndarray:
+def model_action_to_sim(*, model_action: np.ndarray, obs: dict, action_representation: dict | None = None) -> np.ndarray:
+    if action_representation is not None and action_representation["mode"] == OSC:
+        return bounded_osc_command(action=model_action, representation=action_representation)
     sim_action = np.zeros(JOINT_DIMS + 1, dtype=np.float32)
     sim_action[:JOINT_DIMS] = model_action[:JOINT_DIMS]
     sim_action[JOINT_DIMS] = gripper_command(
@@ -486,7 +514,10 @@ def run_rollout(
             )
             chunk_step = 0
 
-        sim_action = model_action_to_sim(model_action=action_chunk[chunk_step], obs=obs)
+        sim_action = model_action_to_sim(
+            model_action=action_chunk[chunk_step], obs=obs,
+            action_representation=getattr(model, "action_representation", None),
+        )
         obs, reward, done, info = env.step(sim_action)
         total_reward += float(reward)
         chunk_step += 1
@@ -594,6 +625,7 @@ def main() -> None:
         camera_names=camera_names,
         camera_height=IMG_DIMS[0],
         camera_width=IMG_DIMS[1],
+        action_representation=model.action_representation,
     )
     env = create_rollout_env(
         env_meta=env_meta,

@@ -87,7 +87,7 @@ def build_plan(*, spec: dict, group_dir: Path, base_config: dict) -> list[dict]:
         overrides = deep_merge(base=dict(fixed), overrides=combo)
         effective = deep_merge(base=base_config, overrides=overrides)
         try:
-            validate_config(config=effective)
+            effective = validate_config(config=effective)
         except (KeyError, ValueError) as error:
             raise ValueError(f"config for {combo} is invalid: {error}") from error
         slug = make_run_slug(config=effective)

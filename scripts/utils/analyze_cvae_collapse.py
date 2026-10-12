@@ -41,7 +41,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from scripts.dataset import NormalizationStats, build_action_chunk, build_proprio
+from scripts.dataset import NormalizationStats, build_proprio
 from scripts.models.act_v2.config import (
     ACTION_CHUNK_SIZE,
     D_MODEL,
@@ -52,6 +52,8 @@ from scripts.models.act_v2.config import (
 )
 from scripts.models.act_v2.model import ACTV2
 from scripts.utils.analyze_z import normalization_from_checkpoint
+from scripts.action_modes import JOINT, resolve_checkpoint_representation, target_actions, preflight_dataset
+from scripts.action_checkpoint import validate_dataset_representation
 
 DEFAULT_OUTPUT_DIR = Path("debug/cvae-collapse")
 DEFAULT_DATASET = Path("datasets/can/ph/2026-09-29_02-01-42_agentview_robot0_eye_in_hand.hdf5")
@@ -105,16 +107,19 @@ def load_model_from_checkpoint(
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     train_config = checkpoint["config"]
 
+    representation = resolve_checkpoint_representation(checkpoint=checkpoint)
     model = ACTV2(
         d_model=D_MODEL,
         nhead=N_HEAD,
         num_layers=NUM_LAYERS,
         z_dims=Z_DIMS,
         proprio_dims=PROPRIO_DIMS,
-        action_chunk_size=ACTION_CHUNK_SIZE,
+        action_chunk_size=int(train_config.get("action_chunk_size", ACTION_CHUNK_SIZE)),
+        action_dims=representation["action_dims"],
         use_z=bool(train_config.get("use_z", True)),
     )
     model.load_state_dict(checkpoint["model"])
+    model.action_representation = representation
     model.to(device=device)
     model.eval()
 
@@ -122,7 +127,7 @@ def load_model_from_checkpoint(
     return model, train_config, normalization
 
 
-def build_demo_lengths(*, dataset_path: Path) -> dict[str, int]:
+def build_demo_lengths(*, dataset_path: Path, k: int = ACTION_CHUNK_SIZE) -> dict[str, int]:
     """Map demo name -> number of valid action-chunk start indices."""
     with h5py.File(dataset_path, "r") as hdf5:
         data = hdf5["data"]
@@ -130,7 +135,7 @@ def build_demo_lengths(*, dataset_path: Path) -> dict[str, int]:
         lengths: dict[str, int] = {}
         for demo_name in demo_names:
             num_timesteps = int(data[demo_name].attrs["num_samples"])
-            lengths[demo_name] = num_timesteps - ACTION_CHUNK_SIZE
+            lengths[demo_name] = max(0, num_timesteps - k + 1)
     return lengths
 
 
@@ -171,7 +176,8 @@ def gather_posterior_inputs(
     demo_name: str,
     timesteps: np.ndarray,
     normalization: NormalizationStats,
-) -> tuple[np.ndarray, np.ndarray]:
+    action_mode: str = JOINT,
+    k: int = ACTION_CHUNK_SIZE,) -> tuple[np.ndarray, np.ndarray]:
     demo = hdf5[f"data/{demo_name}"]
 
     # Low-dimensional arrays are small; read each demo once and index in numpy
@@ -180,11 +186,8 @@ def gather_posterior_inputs(
         joint_pos=demo["obs/robot0_joint_pos"][:][timesteps],
         gripper_qpos=demo["obs/robot0_gripper_qpos"][:][timesteps],
     )
-    action_offsets = timesteps[:, None] + np.arange(ACTION_CHUNK_SIZE)
-    actions = build_action_chunk(
-        joint_pos=demo["next_obs/robot0_joint_pos"][:][action_offsets],
-        gripper_qpos=demo["next_obs/robot0_gripper_qpos"][:][action_offsets],
-    )
+    action_offsets = timesteps[:, None] + np.arange(k)
+    actions = target_actions(demo=demo, action_mode=action_mode)[action_offsets]
 
     proprio = normalization.normalize_proprio(value=proprio)
     actions = normalization.normalize_action(value=actions)
@@ -215,6 +218,7 @@ def collect_posterior(
                     demo_name=demo_name,
                     timesteps=chunk,
                     normalization=normalization,
+                    action_mode=model.action_representation["mode"], k=model.k,
                 )
                 proprio_t = torch.from_numpy(proprio).unsqueeze(1).to(device=device)
                 actions_t = torch.from_numpy(actions).to(device=device)
@@ -384,7 +388,16 @@ def main() -> None:
     output_dir = args.output_dir / run_name / args.checkpoint.stem
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    demo_lengths = build_demo_lengths(dataset_path=dataset_path)
+    with h5py.File(dataset_path, "r") as hdf5:
+        representation = preflight_dataset(
+            hdf5=hdf5, image_keys=tuple(train_config.get("image_keys", ["agentview_image"])),
+            action_mode=model.action_representation["mode"],
+        )
+        validate_dataset_representation(
+            dataset_representation=representation,
+            checkpoint_representation=model.action_representation,
+        )
+    demo_lengths = build_demo_lengths(dataset_path=dataset_path, k=model.k)
     sampled = sample_demo_stratified(
         demo_lengths=demo_lengths,
         total=args.samples,

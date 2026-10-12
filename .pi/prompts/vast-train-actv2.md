@@ -1,6 +1,6 @@
 ---
 description: Train ACT v2 on a fresh Vast.ai RTX 4090 with durable local logging
-argument-hint: "<config-path> [--plan] [--resume <iteration-id>]"
+argument-hint: "<config-path> [--branch <name>] [--expected-commit <sha>] [--plan] [--resume <iteration-id>]"
 ---
 
 Train ACT v2 using `.pi/prompts/scripts/vast-train/workflow.py`. This same
@@ -15,11 +15,12 @@ Use an explicitly supplied config path, or a caller-provided `CONFIG_PATH`.
 Without either, ask for the path; no interactive picker or default config.
 An explicit `--resume <iteration-id-or-dir>` needs no original config. Support
 `--plan` for config resolution/snapshotting without Vast/AWS operations; reject
-other arguments. Quote paths when constructing tool commands.
+other arguments except optional `--branch <name>` and `--expected-commit <sha>`. Quote paths when constructing tool commands.
 
 ```bash
 uv run --frozen python .pi/prompts/scripts/vast-train/workflow.py \
   --config "$CONFIG_PATH"
+# If explicitly supplied, add --branch "$BRANCH"; otherwise fresh runs use act-v2.
 # Optional: --plan, or --resume "$ITERATION_ID" (not both).
 # If supplied by a caller: --expected-commit "$SWEEP_GIT_COMMIT"
 ```
@@ -29,11 +30,26 @@ old completion, interruption, or pinned-revision state. Resume is explicit and
 uses immutable saved configs; source files are not resolved again. Ablations
 invoke the shared driver once with `--spec`, not nested single-config workflows.
 
+Fresh runs default to `act-v2` when `--branch` is omitted. Resume inherits the
+immutable saved branch and SHA; an explicit conflicting branch is rejected
+before execution. Legacy iterations without branch metadata remain `act-v2`,
+without rewriting historical hashes or snapshots. A custom branch must already
+be checked out, clean and anonymously published; no automatic branch switching
+or dirty-check bypass is allowed. Artifact prefixes remain `act_v2`.
+
+Local datasets receive the shared action-mode preflight before renting, across
+all demos and selected image keys. Missing mode defaults to joint targets; OSC
+requires actions and valid source controller metadata. S3-only sources retain
+the existence check and receive the same preflight remotely before launch,
+including size/hash/camera checks. Pinned code missing the helper fails clearly.
+Normalization is not recomputed by this validation. `--plan` performs no AWS
+requests or dataset downloads.
+
 ## Non-negotiable policy
 
 | Setting | Requirement |
 |---|---|
-| Git | Clean, synchronized `act-v2`; anonymous clone of `https://github.com/skpro19/toy-act.git`; pinned SHA verified remotely |
+| Git | Clean, synchronized selected branch (default `act-v2`); anonymous clone of `https://github.com/skpro19/toy-act.git`; pinned SHA verified remotely |
 | GPU / price | Exactly one full RTX 4090, approximately 24 GiB; offer at most $0.80/hour; record actual price separately |
 | Image / disk | `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime`; 100 GB rental; at least 100 GB available at `/workspace` |
 | CPU / RAM | At least 24 allowed online physical cores; supported Zen 3+ family; quota/logical allocation at least 90% of advertised effective vCPUs; at least 64 GB allocated RAM, consistent with offer |
@@ -43,7 +59,7 @@ invoke the shared driver once with `--spec`, not nested single-config workflows.
 | Offer ordering | EPYC 9005, EPYC 9004, Threadripper 7000, EPYC 7003, Ryzen 7000/9000; then price, disk bandwidth, reliability |
 | Retry / quarantine | At most three machines per combo; GPU-start failures quarantine machine ID for 24 hours; search again before replacement |
 | AWS | Profile `toy-pickplace-backup`, region `ap-south-1`; do not request administrative authentication |
-| Data | Config's project-relative `datasets/` path; S3 URI `s3://toy-act/<path>`; verify size, local SHA when available, and requested cameras |
+| Data | Config's project-relative `datasets/` path; S3 URI `s3://toy-act/<path>`; verify size, local SHA when available, requested cameras, and action-mode schema across all demos |
 | Artifacts | `s3://toy-act/checkpoints/act_v2/<run>/` and `s3://toy-act/runs/act_v2/<run>/` |
 | Remote project | `/workspace/toy-act`; control directory `.vast-train` |
 
