@@ -27,9 +27,13 @@ TEST4_ROOT = ('provenance.json', 'environment.txt', 'results.json', 'summary.md'
               'execution.log', 'plot_execution.log', 'artifact_validation.log', 'execution_notes.md')
 TEST4_SEED = ('arrays.npz', 'metadata.json', 'results.json', 'summary.md',
               '01_decoder_latent_sensitivity.png', 'plot_provenance.json')
-# Tests 2 and 3 emit paired reconstruction summaries, without standalone plots.
+RECONSTRUCTION_SPLIT = ('01_paired_reconstruction_combined.png',
+                        '01_paired_reconstruction_combined.provenance.json')
+TEST4_SPLIT = ('02_decoder_sensitivity_combined.png', '02_decoder_sensitivity_combined.provenance.json')
+# Optional --per-seed reconstruction plots are included in the reference.
 GENERIC_ROOT = ('checkpoint.sha256', 'provenance.json', 'environment.txt', 'results.json', 'summary.md')
-GENERIC_SEED = ('arrays.npz', 'metadata.json', 'results.json', 'summary.md')
+GENERIC_SEED = ('arrays.npz', 'metadata.json', 'results.json', 'summary.md',
+                '01_paired_reconstruction.png', '01_paired_reconstruction.provenance.json')
 PLACEHOLDER = 'Reference placeholder — replace with the real artifact.\n'
 
 README = """\
@@ -48,9 +52,11 @@ See `notes/posterior-tests.md` for the rules and the per-file description.
   pair per `{split}/seed-{seed}/`.
 - `test-2/`, `test-3/` — paired reconstruction interventions; provenance,
   environment, checkpoint hash, results and summaries, plus per-seed arrays,
-  metadata, results and summaries. No standalone plot scripts.
+  metadata, results and summaries. Each split has a combined paired-effect plot
+  and plot provenance; optional `--per-seed` adds equivalent seed-level plots.
 - `test-4/` — decoder sensitivity; one plot and `plot_provenance.json` per
-  `{split}/seed-{seed}/`, plus the execution logs at the test root.
+  `{split}/seed-{seed}/`, a combined confidence plot and provenance per split,
+  plus the execution logs at the test root.
 - Regenerate with `uv run python .pi/prompts/scripts/test-posterior-collapse/make_reference.py`.
 """
 
@@ -81,10 +87,12 @@ def write_stub(*, path: Path) -> None:
         path.write_text(PLACEHOLDER)
 
 
-def populate_test(*, directory: Path, root_files, seed_files) -> None:
+def populate_test(*, directory: Path, root_files, seed_files, split_files=()) -> None:
     for name in root_files:
         write_stub(path=directory / name)
     for split in SPLITS:
+        for name in split_files:
+            write_stub(path=directory / split / name)
         for seed in SEEDS:
             for name in seed_files:
                 write_stub(path=directory / split / f'seed-{seed}' / name)
@@ -94,9 +102,12 @@ def main() -> None:
     for tag in TAGS:
         base = ROOT / ITERATION / tag / STEM
         populate_test(directory=base / 'test-1', root_files=TEST1_ROOT, seed_files=TEST1_SEED)
-        populate_test(directory=base / 'test-2', root_files=GENERIC_ROOT, seed_files=GENERIC_SEED)
-        populate_test(directory=base / 'test-3', root_files=GENERIC_ROOT, seed_files=GENERIC_SEED)
-        populate_test(directory=base / 'test-4', root_files=TEST4_ROOT, seed_files=TEST4_SEED)
+        populate_test(directory=base / 'test-2', root_files=GENERIC_ROOT,
+                      seed_files=GENERIC_SEED, split_files=RECONSTRUCTION_SPLIT)
+        populate_test(directory=base / 'test-3', root_files=GENERIC_ROOT,
+                      seed_files=GENERIC_SEED, split_files=RECONSTRUCTION_SPLIT)
+        populate_test(directory=base / 'test-4', root_files=TEST4_ROOT,
+                      seed_files=TEST4_SEED, split_files=TEST4_SPLIT)
     (ROOT / 'README.md').write_text(README)
     print(f'wrote reference tree under {ROOT}')
 

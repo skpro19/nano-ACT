@@ -51,8 +51,8 @@ a full-iteration run produce identical output paths for the same run.
 | Test | Behaviour |
 |---|---|
 | 1 | `run_test1.py`, then `plot_test1.py` |
-| 2 | `run_test2.py`: arbitrary and observation-matched latent swaps versus own posterior |
-| 3 | `run_test3.py`: zero and prior inference baselines versus own posterior |
+| 2 | `run_test2.py`, then `plot_test2.py --checkpoint-dir <dir>`: arbitrary and proprio-matched latent swaps versus own posterior |
+| 3 | `run_test3.py`, then `plot_test3.py --checkpoint-dir <dir>`: zero and prior inference baselines versus own posterior |
 | 4 | `run_test4.py`, then `plot_test4.py --checkpoint-dir <dir>`: decoder sensitivity, all 10 prior-draw pairs |
 
 Tests 2–4 support each checkpoint's recorded dataset, action representation and
@@ -70,6 +70,24 @@ Do not delete or overwrite incompatible existing outputs. Tests 2–4 resume onl
 with identical execution provenance and verified array hashes; legacy or changed
 artifacts fail closed. `run_test1.py` skips existing seed arrays and refuses a
 checkpoint SHA mismatch; later tests additionally verify its provenance.
+
+## Plot artifacts (inference-free regeneration)
+
+- Tests 2/3: `<test>/<split>/01_paired_reconstruction_combined.png` and
+  matching `.provenance.json`, read from root `results.json`. Three panels show
+  own/intervention reconstruction point estimates, paired absolute effects and
+  paired relative effects with stored 95% CIs and ±0.002 / ±2% thresholds.
+  Intervention L1 = paired `own_l1 + absolute`; no marginal reconstruction CIs
+  are computed or implied. Combined estimates average seeds within demonstration,
+  not independent seed replicates. Add `--per-seed` to write
+  `<split>/seed-<n>/01_paired_reconstruction.png` and matching provenance.
+- Test 4: `<split>/02_decoder_sensitivity_combined.png` and matching provenance
+  use root combined results and stored 95% CIs with the 0.002 threshold.
+  Existing `<split>/seed-<n>/01_decoder_latent_sensitivity.png` and
+  `plot_provenance.json` retain per-seed confidence and distribution diagnostics.
+  These measure prediction displacement, **not** reconstruction error.
+- Plotters only read numerical results/arrays; they do not rerun inference or
+  modify execution provenance. Run any plotter directly with `--checkpoint-dir`.
 
 ## Workflow
 

@@ -212,6 +212,11 @@ def run(*, command: list[str], dry_run: bool) -> None:
         subprocess.run(command, check=True)
 
 
+def plot_command(*, test: int, output: Path) -> list[str]:
+    return ['uv', 'run', f'.pi/prompts/scripts/test-posterior-collapse/plot_test{test}.py',
+            '--checkpoint-dir', str(output)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     target = parser.add_mutually_exclusive_group(required=True)
@@ -274,17 +279,14 @@ def main() -> None:
                     if train_commit:
                         command += ['--train-commit', train_commit]
                     run(command=command, dry_run=args.dry_run)
-                    run(command=['uv', 'run', '.pi/prompts/scripts/test-posterior-collapse/plot_test1.py',
-                                 '--checkpoint-dir', str(output)], dry_run=args.dry_run)
+                    run(command=plot_command(test=test, output=output), dry_run=args.dry_run)
                 else:
                     command = ['uv', 'run', f'.pi/prompts/scripts/test-posterior-collapse/run_test{test}.py',
                                '--iteration', iteration, '--checkpoint', str(checkpoint)]
                     if train_commit:
                         command += ['--train-commit', train_commit]
                     run(command=command, dry_run=args.dry_run)
-                    if test == 4:
-                        run(command=['uv', 'run', '.pi/prompts/scripts/test-posterior-collapse/plot_test4.py',
-                                     '--checkpoint-dir', str(output)], dry_run=args.dry_run)
+                    run(command=plot_command(test=test, output=output), dry_run=args.dry_run)
             except subprocess.CalledProcessError as error:
                 print(f'FAIL {label} test-{test}: exit {error.returncode}', flush=True)
                 failed.append((label, test))
