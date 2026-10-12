@@ -99,8 +99,9 @@ class LatentSwitchTest(unittest.TestCase):
         torch.testing.assert_close(baseline, supplied)
         torch.testing.assert_close(baseline, inferred)
 
-    def test_enabled_training_samples_and_inference_uses_zero(self) -> None:
+    def test_enabled_training_forward_samples_posterior(self) -> None:
         model = self.make_model(use_z=True)
+        model.train()
         proprio, targets, images = self.observations()
         with patch.object(torch, "randn_like", side_effect=lambda tensor: torch.ones_like(tensor)), \
                 patch.object(model.z_encoder, "forward", wraps=model.z_encoder.forward) as projection:
@@ -108,8 +109,29 @@ class LatentSwitchTest(unittest.TestCase):
             torch.testing.assert_close(
                 projection.call_args.args[0], mu + (0.5 * log_variance).exp(),
             )
-            model.infer(proprio=proprio, img=images)
+
+    def test_enabled_eval_forward_and_infer_use_zero_latent(self) -> None:
+        model = self.make_model(use_z=True)
+        proprio, targets, images = self.observations()
+        with patch.object(model, "posterior", side_effect=AssertionError("posterior called")), \
+                patch.object(model.z_encoder, "forward", wraps=model.z_encoder.forward) as projection:
+            predictions, mu, log_variance = model(proprio=proprio, actions=targets, img=images)
             torch.testing.assert_close(projection.call_args.args[0], torch.zeros(2, 1, 2))
+            inferred = model.infer(proprio=proprio, img=images)
+            torch.testing.assert_close(projection.call_args.args[0], torch.zeros(2, 1, 2))
+        torch.testing.assert_close(predictions, inferred)
+        self.assertIsNone(mu)
+        self.assertIsNone(log_variance)
+        self.assertEqual(predictions.shape, targets.shape)
+
+    def test_enabled_eval_forward_is_independent_of_targets(self) -> None:
+        model = self.make_model(use_z=True)
+        proprio, targets, images = self.observations()
+        changed = targets.clone()
+        changed[:, 1] = 1000.0
+        baseline, _, _ = model(proprio=proprio, actions=targets, img=images)
+        actual, _, _ = model(proprio=proprio, actions=changed, img=images)
+        torch.testing.assert_close(baseline, actual)
 
     def test_posterior_ignores_padded_targets(self) -> None:
         model = self.make_model(use_z=True)

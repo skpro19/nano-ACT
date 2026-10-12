@@ -154,6 +154,7 @@ class ACTV2(nn.Module):
         img: torch.Tensor,
         action_mask: torch.Tensor | None = None,
     ):
+        """Training forward: posterior z when training; prior z when evaluating."""
 
         proprio_tokens = self.proprio_encoder(proprio)
         img_tokens = self.image_encoder(img)
@@ -162,12 +163,16 @@ class ACTV2(nn.Module):
         log_sigma_x2 = None
         z = None
         if self.use_z:
-            mu, log_sigma_x2 = self.posterior(
-                proprio=proprio,
-                actions=actions,
-                mask=action_mask,
-            )
-            z = mu + torch.randn_like(mu) * torch.sqrt(torch.exp(log_sigma_x2))
+            if self.training:
+                mu, log_sigma_x2 = self.posterior(
+                    proprio=proprio,
+                    actions=actions,
+                    mask=action_mask,
+                )
+                z = mu + torch.randn_like(mu) * torch.sqrt(torch.exp(log_sigma_x2))
+            else:
+                B, _, _ = proprio.shape
+                z = torch.zeros(B, 1, self.z_dims, device=proprio.device, dtype=proprio.dtype)
 
         actions = self.decode_from_tokens(
             img_tokens=img_tokens,
