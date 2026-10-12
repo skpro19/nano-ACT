@@ -2,8 +2,11 @@
 
 `--iteration` enumerates every run recorded by the iteration; `--run` targets a
 single run by the TensorBoard run name it shows (`<combo-id>/<run-name>`, or the
-bare `<run-name>`). Each run resolves its own latest checkpoint and dispatches
-each requested test to its runner and plot script:
+bare `<run-name>`). The sweep's checkpoints live in S3
+(`s3://toy-act/checkpoints/act_v2` by default), which is the source of truth:
+local `checkpoints/act_v2` mirrors can be partial, so each run's latest step is
+resolved against the bucket and downloaded into the local mirror before its
+tests run.
 
     uv run scripts/utils/posterior-collpase/run_suite.py --iteration i526a92dd6741 --tests 1 2 3 4
     uv run scripts/utils/posterior-collpase/run_suite.py --run 0000/2026-10-12_10-36-35_slug-i526a92dd6741
@@ -14,32 +17,144 @@ yet, and test 4 is implemented only by the checkpoint-pinned `run_test4.py`, so
 both are reported and skipped rather than silently ignored.
 """
 from pathlib import Path
+from typing import Any
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+
+import boto3
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import layout
 
-CHECKS_ROOT = Path('checkpoints/act_v2')
+CHECKPOINT_MIRROR = Path('checkpoints/act_v2')
+BUCKET = os.environ.get('TOY_ACT_BUCKET', 'toy-act')
+BUCKET_CHECKPOINT_PREFIX = os.environ.get('TOY_ACT_CHECKPOINT_PREFIX', 'checkpoints/act_v2')
+BUCKET_REGION = os.environ.get('TOY_ACT_AWS_REGION', 'ap-south-1')
+BUCKET_PROFILE = os.environ.get('TOY_ACT_AWS_PROFILE', 'toy-pickplace-backup')
 ALL_TESTS = (1, 2, 3, 4)
 UNIMPLEMENTED = (2, 3)
+STEP_CHECKPOINT = re.compile(r'step_(\d+)\.pt')
 # TensorBoard publishes each run as <combo-id>/<run-name>; the run name always
 # ends in the owning iteration's `-i<12 hex>` token.
 RUN_REFERENCE = re.compile(r'^(?:(?P<combo_id>[0-9]{4})/)?(?P<run_name>[^/]+)$')
 RUN_TOKEN = re.compile(r'-i?([0-9a-f]{12})$')
 
 
-def find_run_directory(*, run_name: str, root: Path) -> Path:
-    """The newest local checkpoint directory whose name ends with `_<run_name>`."""
-    matches = sorted(path for path in root.iterdir()
-                     if path.is_dir() and path.name.endswith('_' + run_name))
-    if not matches:
-        raise FileNotFoundError(f'no local checkpoint directory ends with _{run_name}')
-    return matches[-1]
+def checkpoint_step(*, name: str) -> int:
+    """The numeric step in a `step_<digits>.pt` checkpoint name."""
+    match = STEP_CHECKPOINT.fullmatch(name)
+    if match is None:
+        raise ValueError(f'not a checkpoint name: {name}')
+    return int(match.group(1))
+
+
+class CheckpointBucket:
+    """Runs and checkpoints in the sweep's S3 bucket, the source of truth.
+
+    The bucket is authoritative and local `checkpoints/act_v2` mirrors can miss
+    steps, so every run and checkpoint name is resolved here and only then
+    downloaded into the local mirror for the test runners to load.
+    """
+
+    def __init__(self, *, client: Any, bucket: str, prefix: str) -> None:
+        self._client = client
+        self._bucket = bucket
+        self._prefix = prefix.rstrip('/')
+        self._run_directories: list[str] | None = None
+
+    def _list_v2(self, *, prefix: str, delimiter: str | None = None) -> list[dict[str, Any]]:
+        """Every response page of one `list_objects_v2` query, continuation included."""
+        pages = []
+        token = None
+        while True:
+            request: dict[str, Any] = {'Bucket': self._bucket, 'Prefix': prefix}
+            if delimiter is not None:
+                request['Delimiter'] = delimiter
+            if token is not None:
+                request['ContinuationToken'] = token
+            page = self._client.list_objects_v2(**request)
+            pages.append(page)
+            if not page.get('IsTruncated'):
+                return pages
+            token = page['NextContinuationToken']
+
+    def run_directories(self) -> list[str]:
+        """Every run directory directly under the checkpoint prefix (cached)."""
+        if self._run_directories is None:
+            base = self._prefix + '/'
+            directories = []
+            for page in self._list_v2(prefix=base, delimiter='/'):
+                directories.extend(item['Prefix'].removeprefix(base).rstrip('/')
+                                   for item in page.get('CommonPrefixes', []))
+            self._run_directories = sorted(directories)
+        return self._run_directories
+
+    def find_run_directory(self, *, run_name: str) -> str:
+        """The newest bucket run directory whose name ends with `_<run_name>`."""
+        matches = [directory for directory in self.run_directories()
+                   if directory.endswith('_' + run_name)]
+        if not matches:
+            raise FileNotFoundError(f'no bucket run directory ends with _{run_name}')
+        return matches[-1]
+
+    def require_run_directory(self, *, run_directory: str) -> None:
+        """Fail when the named run directory is not present in the bucket."""
+        if run_directory not in self.run_directories():
+            raise FileNotFoundError(f'bucket run directory not found: {run_directory}')
+
+    def checkpoint_names(self, *, run_directory: str) -> list[str]:
+        """Every `step_*.pt` object under one run directory, lowest step first."""
+        prefix = f'{self._prefix}/{run_directory}/'
+        names = []
+        for page in self._list_v2(prefix=prefix):
+            names.extend(item['Key'].removeprefix(prefix)
+                         for item in page.get('Contents', [])
+                         if STEP_CHECKPOINT.fullmatch(item['Key'].removeprefix(prefix)))
+        return sorted(names, key=lambda name: checkpoint_step(name=name))
+
+    def select_checkpoint(self, *, run_directory: str, step: str | None) -> str:
+        """The named checkpoint, or the highest-numbered `step_*.pt` when step is None."""
+        names = self.checkpoint_names(run_directory=run_directory)
+        if step is not None:
+            name = f'{step}.pt'
+            if name not in names:
+                raise FileNotFoundError(f'{self._prefix}/{run_directory}/{name} not found in {self._bucket}')
+            return name
+        if not names:
+            raise FileNotFoundError(f'no step_*.pt under {self._prefix}/{run_directory} in {self._bucket}')
+        return names[-1]
+
+    def ensure_local(self, *, run_directory: str, checkpoint_name: str, mirror_root: Path,
+                     download: bool = True) -> Path:
+        """The local mirror path for one checkpoint, downloading it when missing.
+
+        A local file whose size matches the bucket object is reused; anything else
+        is downloaded to a sibling `.tmp` and atomically replaced, so a partial
+        transfer is never mistaken for a usable checkpoint.
+        """
+        key = f'{self._prefix}/{run_directory}/{checkpoint_name}'
+        destination = Path(mirror_root) / run_directory / checkpoint_name
+        if not download:
+            return destination
+        expected_size = self._client.head_object(Bucket=self._bucket, Key=key)['ContentLength']
+        if destination.is_file() and destination.stat().st_size == expected_size:
+            return destination
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + '.tmp')
+        self._client.download_file(self._bucket, key, str(temporary))
+        temporary.replace(destination)
+        return destination
+
+
+def build_bucket_client(*, profile: str | None, region: str) -> Any:
+    """A boto3 S3 client using `profile` when given and the default chain otherwise."""
+    session = boto3.Session(profile_name=profile, region_name=region)
+    return session.client('s3')
 
 
 def parse_run_reference(*, value: str) -> tuple[str, str] | None:
@@ -54,8 +169,9 @@ def parse_run_reference(*, value: str) -> tuple[str, str] | None:
     return match['combo_id'] or '', match['run_name']
 
 
-def resolve_run_scope(*, value: str, iteration_root: Path, checks_root: Path) -> tuple[str, dict, Path]:
-    """Resolve a TensorBoard run name to its iteration token, combo, and checkpoint directory."""
+def resolve_run_scope(*, value: str, iteration_root: Path,
+                      bucket: CheckpointBucket) -> tuple[str, dict, str]:
+    """Resolve a TensorBoard run name to its iteration token, combo, and bucket run directory."""
     parsed = parse_run_reference(value=value)
     if parsed is None:
         raise ValueError(f'run name {value!r} must be <combo-id>/<run-name> or a bare <run-name>, '
@@ -72,23 +188,8 @@ def resolve_run_scope(*, value: str, iteration_root: Path, checks_root: Path) ->
         matched = [combo for combo in combos if run_name.endswith(combo['name'])]
     if len(matched) != 1:
         raise ValueError(f'run name {value!r} matches {len(matched)} combos in {iteration_dir}')
-    run_directory = Path(checks_root) / run_name
-    if not run_directory.is_dir():
-        raise FileNotFoundError(f'checkpoint directory not found: {run_directory}')
-    return iteration, matched[0], run_directory
-
-
-def select_checkpoint(*, directory: Path, step: str | None) -> Path:
-    """The named checkpoint, or the highest-numbered `step_*.pt` when step is None."""
-    if step is not None:
-        checkpoint = directory / f'{step}.pt'
-        if not checkpoint.is_file():
-            raise FileNotFoundError(f'{checkpoint} not found')
-        return checkpoint
-    checkpoints = sorted(directory.glob('step_*.pt'), key=lambda path: int(path.stem.rsplit('_', 1)[1]))
-    if not checkpoints:
-        raise FileNotFoundError(f'no step_*.pt under {directory}')
-    return checkpoints[-1]
+    bucket.require_run_directory(run_directory=run_name)
+    return iteration, matched[0], run_name
 
 
 def parse_tests(*, values: list[str]) -> list[int]:
@@ -120,7 +221,7 @@ def main() -> None:
                                       '(one run; the bare run-name is accepted too)')
     parser.add_argument('--tests', nargs='*', default=[], help='test ids to run (default: all)')
     parser.add_argument('--step', default=None,
-                        help="checkpoint step pinned for every run (default: each run's latest)")
+                        help="checkpoint step pinned for every run, resolved in the bucket (default: each run's latest)")
     parser.add_argument('--dry-run', action='store_true', help='print commands without running them')
     args = parser.parse_args()
 
@@ -129,11 +230,14 @@ def main() -> None:
     except ValueError as error:
         raise SystemExit(str(error))
 
+    bucket = CheckpointBucket(client=build_bucket_client(profile=BUCKET_PROFILE or None, region=BUCKET_REGION),
+                              bucket=BUCKET, prefix=BUCKET_CHECKPOINT_PREFIX)
+
     run_directory, selected_combo = None, None
     if args.run is not None:
         try:
             iteration, selected_combo, run_directory = resolve_run_scope(
-                value=args.run, iteration_root=layout.ITERATION_ROOT, checks_root=CHECKS_ROOT)
+                value=args.run, iteration_root=layout.ITERATION_ROOT, bucket=bucket)
         except (ValueError, FileNotFoundError) as error:
             raise SystemExit(str(error))
     else:
@@ -149,9 +253,11 @@ def main() -> None:
     for combo in combos:
         run_name = combo['name']
         try:
-            run_dir = run_directory if run_directory is not None else find_run_directory(
-                run_name=run_name, root=CHECKS_ROOT)
-            checkpoint = select_checkpoint(directory=run_dir, step=args.step)
+            run_dir = run_directory if run_directory is not None else bucket.find_run_directory(
+                run_name=run_name)
+            checkpoint_name = bucket.select_checkpoint(run_directory=run_dir, step=args.step)
+            checkpoint = bucket.ensure_local(run_directory=run_dir, checkpoint_name=checkpoint_name,
+                                             mirror_root=CHECKPOINT_MIRROR, download=not args.dry_run)
         except FileNotFoundError as error:
             print(f'SKIP {run_name}: {error}', flush=True)
             skipped.append((run_name, str(error)))

@@ -23,12 +23,26 @@ Reject an argument that is neither an iteration token matching `i?[0-9a-f]{12}`
 nor a run name ending in the iteration token `-i<12 hex>`, an unknown test id, or
 a missing required argument; never guess.
 
+## Checkpoint source
+
+Checkpoints are read from the bucket, not from the local mirrors. The saved
+iteration only records the sweep's runs; each run's checkpoint lives at
+`s3://toy-act/checkpoints/act_v2/<run-name>/`, and the bucket is the source of
+truth because local `checkpoints/act_v2` mirrors can be partial. The bucket,
+prefix, region and AWS profile default to `toy-act`, `checkpoints/act_v2`,
+`ap-south-1` and `toy-pickplace-backup`, and can be overridden with
+`TOY_ACT_BUCKET`, `TOY_ACT_CHECKPOINT_PREFIX`, `TOY_ACT_AWS_REGION` and
+`TOY_ACT_AWS_PROFILE`.
+
 ## What runs
 
 `scripts/utils/posterior-collpase/run_suite.py` enumerates every run recorded by
 the iteration (or selects the single run named by `$1`), resolves each run's own
-latest checkpoint (`--step` pins one step for every run instead), derives the
-tagged output directory with `layout.py`, and dispatches each requested test.
+latest checkpoint from the bucket (`--step` pins one step for every run
+instead, and must exist in the bucket), downloads the selected checkpoint into
+`checkpoints/act_v2/<run-name>/` when the local mirror is missing or stale,
+derives the tagged output directory with `layout.py`, and dispatches each
+requested test.
 
 Both modes write the same per-run artifacts under
 `debug/posterior-collapse/<iteration>/[<config-tag>/]<stem>/`, so a run name and
@@ -46,11 +60,12 @@ by skipping seed arrays that already exist and stops if the directory's
 
 ## Workflow
 
-1. Require `uv` and run from the repository root.
+1. Require `uv`, run from the repository root, and have AWS access to the
+   checkpoint bucket (the default `toy-pickplace-backup` profile).
 2. Validate `$1` and `${@:2}`; choose `--iteration "$1"` for an iteration token
    or `--run "$1"` for a run name.
 3. Run the suite and stream the output. It exits non-zero when a run has no
-   local checkpoint or a test fails.
+   checkpoint in the bucket or a test fails.
 4. Report a compact summary: per run, the config tag, the resolved checkpoint,
    and pass/skip/fail per requested test, plus the output directory under
    `debug/posterior-collapse/<iteration>/[<config-tag>/]<stem>/`.
@@ -68,4 +83,4 @@ uv run scripts/utils/posterior-collpase/run_suite.py --run "$1" --tests ${@:2}
 - Omit the test ids to attempt all four.
 - Add `--dry-run` to print the commands without executing them.
 - Add `--step step_000100000` to pin one step for every run instead of each
-  run's latest; a run without it is reported and skipped.
+  run's latest; a run without that step in the bucket is reported and skipped.
