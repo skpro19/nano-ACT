@@ -48,16 +48,26 @@ else:
 '''
 
 
-def cancel(*, iteration: Iteration, instance_id: int, wait_seconds: int) -> None:
+def select_combo(*, iteration: Iteration, instance_id: int) -> dict:
     matches = [combo for combo in iteration.state['combos'] if combo.get('instance_id') == instance_id]
     if len(matches) != 1:
         raise Blocked('Instance must uniquely belong to the explicitly selected iteration')
     combo = matches[0]
     if not combo.get('training_launch_requested'):
         raise Blocked('Cancellation requires a launched run; this is not provisional cleanup')
+    return combo
+
+
+def request_cancel(*, iteration: Iteration, combo: dict, instance_id: int) -> bool:
+    """Prove watcher ownership and send TERM; the watcher still owns cleanup.
+
+    Returns False when the run is already terminal and reconciled, so no remote
+    signal was sent. This is the first phase of `cancel`, and it lets a bulk
+    caller signal every run before waiting on any single watcher.
+    """
     if reconcile(iteration=iteration, combo=combo):
         print(f'Instance {instance_id}: already terminal and reconciled')
-        return
+        return False
     run = combo['run']
     records = instances(iteration.journal)
     record = next((record for record in records if record['id'] == instance_id), None)
@@ -73,6 +83,10 @@ def cancel(*, iteration: Iteration, instance_id: int, wait_seconds: int) -> None
     command = 'cd /workspace/toy-act && /root/.local/bin/uv run --frozen --only-group train python -'
     iteration.journal.run(args=ssh_args(run=run, command=command), input_text=script,
                           timeout=60, log_path=Path(combo['run_dir']) / 'cancellation.log')
+    return True
+
+
+def await_removal(*, iteration: Iteration, combo: dict, instance_id: int, wait_seconds: int) -> None:
     deadline = time.monotonic() + wait_seconds
     while True:
         if reconcile(iteration=iteration, combo=combo):
@@ -82,6 +96,12 @@ def cancel(*, iteration: Iteration, instance_id: int, wait_seconds: int) -> None
             raise Blocked('Cancellation requested; watcher still owns cleanup. Retry this command to verify removal')
         iteration.journal.progress(text=f'Instance {instance_id}: waiting for watcher report and verified removal')
         time.sleep(min(10, max(0, deadline - time.monotonic())))
+
+
+def cancel(*, iteration: Iteration, instance_id: int, wait_seconds: int) -> None:
+    combo = select_combo(iteration=iteration, instance_id=instance_id)
+    if request_cancel(iteration=iteration, combo=combo, instance_id=instance_id):
+        await_removal(iteration=iteration, combo=combo, instance_id=instance_id, wait_seconds=wait_seconds)
 
 
 def main() -> int:

@@ -206,6 +206,11 @@ Interrupted verification is recoverable by repeating this exact cancellation
 command; do not run the sweep driver merely to cancel (it could advance other
 combos). No Git gate or saved revision is changed, and no new training starts.
 
+To cancel every launched run in one iteration at once, use `/stop-ablation-runs`
+with a full iteration ID, a short `i<12 hex>` suffix, or a directory. It signals
+all nonterminal launched runs through this same watcher-owned path and deletes
+no local records or S3 artifacts.
+
 ## Create diagnostics and provider-confirmed recovery
 
 Create requests use `create_request.py`, a single-shot API adapter, rather than
