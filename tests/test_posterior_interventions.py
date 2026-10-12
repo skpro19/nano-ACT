@@ -10,7 +10,7 @@ import pytest
 import torch
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / '.pi/scripts/test-posterior-collapse'))
+sys.path.insert(0, str(REPO / '.pi/prompts/scripts/test-posterior-collapse'))
 import interventions
 import run_test1
 from audit_helpers import valid_l1, verify_resume

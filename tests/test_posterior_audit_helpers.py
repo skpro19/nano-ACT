@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-HELPERS = REPO / '.pi/scripts/test-posterior-collapse'
+HELPERS = REPO / '.pi/prompts/scripts/test-posterior-collapse'
 sys.path.insert(0, str(HELPERS))
 from audit_helpers import file_hash, paired, posterior_summary, verify_resume
 

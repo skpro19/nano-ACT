@@ -18,7 +18,7 @@ import re
 import sys
 import tomllib
 
-REPO = Path(__file__).resolve().parents[3]
+REPO = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO))
 
 from scripts.action_modes import JOINT

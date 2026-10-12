@@ -5,14 +5,14 @@ every required artifact, populated for all four `i526a92dd6741` config tags. It
 is documentation, not results: replace the stubs when producing a real audit.
 Run from the repository root:
 
-    uv run python .pi/scripts/test-posterior-collapse/make_reference.py
+    uv run python .pi/prompts/scripts/test-posterior-collapse/make_reference.py
 """
 from pathlib import Path
 import json
 import struct
 import zlib
 
-REPO = Path(__file__).resolve().parents[3]
+REPO = Path(__file__).resolve().parents[4]
 ROOT = REPO / 'debug' / 'posterior-collapse' / 'reference'
 ITERATION = 'i526a92dd6741'
 STEM = 'step_000100000'
@@ -51,7 +51,7 @@ See `notes/posterior-tests.md` for the rules and the per-file description.
   metadata, results and summaries. No standalone plot scripts.
 - `test-4/` — decoder sensitivity; one plot and `plot_provenance.json` per
   `{split}/seed-{seed}/`, plus the execution logs at the test root.
-- Regenerate with `uv run python .pi/scripts/test-posterior-collapse/make_reference.py`.
+- Regenerate with `uv run python .pi/prompts/scripts/test-posterior-collapse/make_reference.py`.
 """
 
 

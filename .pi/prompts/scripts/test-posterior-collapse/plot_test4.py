@@ -60,7 +60,7 @@ def plot_folder(folder):
     fig.savefig(output, dpi=160)
     plt.close(fig)
     (folder / 'plot_provenance.json').write_text(json.dumps({
-        'command': 'uv run .pi/scripts/test-posterior-collapse/plot_test4.py',
+        'command': 'uv run .pi/prompts/scripts/test-posterior-collapse/plot_test4.py',
         'code_sha256': sha256(Path(__file__)), 'matplotlib_version': matplotlib.__version__,
         'input_sha256': {name: sha256(folder / name) for name in ('arrays.npz', 'metadata.json', 'results.json')},
         'graph_sha256': sha256(output)}, indent=2) + '\n')

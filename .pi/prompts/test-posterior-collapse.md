@@ -36,7 +36,7 @@ prefix, region and AWS profile default to `toy-act`, `checkpoints/act_v2`,
 
 ## What runs
 
-`.pi/scripts/test-posterior-collapse/run_suite.py` enumerates every run recorded by
+`.pi/prompts/scripts/test-posterior-collapse/run_suite.py` enumerates every run recorded by
 the iteration (or selects the single run named by `$1`), resolves each run's own
 latest checkpoint from the bucket (`--step` pins one step for every run
 instead, and must exist in the bucket), downloads the selected checkpoint into
@@ -87,9 +87,9 @@ checkpoint SHA mismatch; later tests additionally verify its provenance.
 
 ```bash
 # iteration token: every run in the sweep
-uv run .pi/scripts/test-posterior-collapse/run_suite.py --iteration "$1" --tests ${@:2}
+uv run .pi/prompts/scripts/test-posterior-collapse/run_suite.py --iteration "$1" --tests ${@:2}
 # run name: only that run
-uv run .pi/scripts/test-posterior-collapse/run_suite.py --run "$1" --tests ${@:2}
+uv run .pi/prompts/scripts/test-posterior-collapse/run_suite.py --run "$1" --tests ${@:2}
 ```
 
 - Pass exactly one of `--iteration` / `--run`, matching the form of `$1`.

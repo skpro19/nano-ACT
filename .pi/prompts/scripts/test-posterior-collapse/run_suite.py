@@ -8,8 +8,8 @@ local `checkpoints/act_v2` mirrors can be partial, so each run's latest step is
 resolved against the bucket and downloaded into the local mirror before its
 tests run.
 
-    uv run .pi/scripts/test-posterior-collapse/run_suite.py --iteration i526a92dd6741 --tests 1 2 3 4
-    uv run .pi/scripts/test-posterior-collapse/run_suite.py --run 0000/2026-10-12_10-36-35_slug-i526a92dd6741
+    uv run .pi/prompts/scripts/test-posterior-collapse/run_suite.py --iteration i526a92dd6741 --tests 1 2 3 4
+    uv run .pi/prompts/scripts/test-posterior-collapse/run_suite.py --run 0000/2026-10-12_10-36-35_slug-i526a92dd6741
 
 `--step` pins one checkpoint step for every run instead of using each run's
 latest. `--tests` defaults to every known test id. Tests 2–4 reuse verified
@@ -269,21 +269,21 @@ def main() -> None:
         for test in dispatch_tests(tests=tests, output=output):
             try:
                 if test == 1:
-                    command = ['uv', 'run', '.pi/scripts/test-posterior-collapse/run_test1.py',
+                    command = ['uv', 'run', '.pi/prompts/scripts/test-posterior-collapse/run_test1.py',
                                '--iteration', iteration, '--checkpoint', str(checkpoint)]
                     if train_commit:
                         command += ['--train-commit', train_commit]
                     run(command=command, dry_run=args.dry_run)
-                    run(command=['uv', 'run', '.pi/scripts/test-posterior-collapse/plot_test1.py',
+                    run(command=['uv', 'run', '.pi/prompts/scripts/test-posterior-collapse/plot_test1.py',
                                  '--checkpoint-dir', str(output)], dry_run=args.dry_run)
                 else:
-                    command = ['uv', 'run', f'.pi/scripts/test-posterior-collapse/run_test{test}.py',
+                    command = ['uv', 'run', f'.pi/prompts/scripts/test-posterior-collapse/run_test{test}.py',
                                '--iteration', iteration, '--checkpoint', str(checkpoint)]
                     if train_commit:
                         command += ['--train-commit', train_commit]
                     run(command=command, dry_run=args.dry_run)
                     if test == 4:
-                        run(command=['uv', 'run', '.pi/scripts/test-posterior-collapse/plot_test4.py',
+                        run(command=['uv', 'run', '.pi/prompts/scripts/test-posterior-collapse/plot_test4.py',
                                      '--checkpoint-dir', str(output)], dry_run=args.dry_run)
             except subprocess.CalledProcessError as error:
                 print(f'FAIL {label} test-{test}: exit {error.returncode}', flush=True)

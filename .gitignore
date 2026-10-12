@@ -31,11 +31,8 @@ configs/
 
 .pi/*
 !.pi/prompts/
-!.pi/scripts/
-.pi/scripts/*
-!.pi/scripts/test-posterior-collapse/
-.pi/scripts/test-posterior-collapse/*
-!.pi/scripts/test-posterior-collapse/*.py
+.pi/prompts/scripts/test-posterior-collapse/*
+!.pi/prompts/scripts/test-posterior-collapse/*.py
 !.pi/extensions/
 .pi/extensions/*
 !.pi/extensions/question.ts
