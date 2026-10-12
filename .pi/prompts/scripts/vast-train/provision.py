@@ -1,6 +1,7 @@
 """Offer selection and durable provisional rentals. Never owns a training run."""
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import os
@@ -12,6 +13,7 @@ import time
 from collections.abc import Callable
 import uuid
 
+from create_request import request_snapshot, safe_diagnostics, unique_fields
 from hardware_gate import cpu_rank, evaluate
 from ssh_endpoint import select_endpoint
 from workflow_common import (
@@ -55,7 +57,8 @@ def shortlist(*, offers: list, quarantine: dict[str, float], epoch: float) -> li
                 continue
             if quarantine.get(str(offer["machine_id"]), 0) > epoch - 86400:
                 continue
-            if not isinstance(offer["id"], int) or not isinstance(offer["machine_id"], int):
+            if (type(offer["id"]) is not int or offer["id"] <= 0
+                    or type(offer["machine_id"]) is not int or offer["machine_id"] <= 0):
                 continue
             ranked.append((rank, numeric["dph_total"], -numeric["disk_bw"], -numeric["reliability"], offer))
         except (KeyError, TypeError, ValueError):
@@ -127,32 +130,64 @@ def restore_create_result(*, journal: Journal, attempt: dict, directory: Path,
     path = directory / f"create-{attempt['label']}.json"
     if not path.exists():
         return  # Historical requests without receipts remain conservative.
-    result = json.loads(path.read_text())
-    if (result.get("version") != 1 or result.get("label") != attempt["label"]
-            or result.get("offer_id") != attempt["offer"]["id"]
-            or result.get("outcome") not in {"created", "rejected", "unknown"}):
-        raise Blocked(f"Create receipt identity/schema mismatch: {path}")
-    if attempt.get("create_result") == result:
-        return
+    try:
+        receipt = json.loads(path.read_text(), object_pairs_hook=unique_fields)
+        if (type(receipt) is not dict or type(receipt.get("version")) is not int
+                or receipt["version"] != 1 or type(receipt.get("label")) is not str
+                or receipt["label"] != attempt["label"]
+                or type(receipt.get("offer_id")) is not int or receipt["offer_id"] <= 0
+                or receipt["offer_id"] != attempt["offer"]["id"]
+                or type(receipt.get("outcome")) is not str
+                or receipt["outcome"] not in {"created", "rejected", "unknown"}):
+            raise ValueError("Invalid core receipt")
+        # Construct state from known values only. Historical receipt files are
+        # immutable; free-form diagnostics and unused timestamps stay out of state.
+        result = {"version": 1, "label": attempt["label"], "offer_id": receipt["offer_id"],
+                  "outcome": receipt["outcome"], **safe_diagnostics(receipt)}
+        snapshot_keys = {"request_snapshot", "request_snapshot_sha256"}
+        if snapshot_keys & receipt.keys():
+            if not snapshot_keys <= receipt.keys():
+                raise ValueError("Incomplete snapshot")
+            snapshot = receipt["request_snapshot"]
+            if type(snapshot) is not dict or set(snapshot) != {"offer_id", "payload"}:
+                raise ValueError("Invalid snapshot shape")
+            if (type(snapshot["offer_id"]) is not int
+                    or snapshot["offer_id"] != receipt["offer_id"]):
+                raise ValueError("Invalid snapshot identity")
+            validated = request_snapshot(offer_id=snapshot["offer_id"],
+                                         label=attempt["label"], payload=snapshot["payload"])
+            digest = receipt["request_snapshot_sha256"]
+            canonical = json.dumps(validated, sort_keys=True, separators=(",", ":")).encode()
+            if (type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                    or digest != hashlib.sha256(canonical).hexdigest()):
+                raise ValueError("Invalid snapshot hash")
+            result.update(request_snapshot=validated, request_snapshot_sha256=digest)
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        raise Blocked(f"Create receipt identity/schema mismatch: {path}") from None
     if result["outcome"] == "created":
-        identity = result.get("instance_id")
+        identity = receipt.get("instance_id")
         if type(identity) is not int or identity <= 0:
             raise Blocked(f"Invalid created instance identity: {path}")
         if attempt.get("returned_instance_id", identity) != identity:
             raise Blocked("Create receipt conflicts with saved instance identity")
-        attempt["returned_instance_id"] = identity
+        result["instance_id"] = identity
     elif result["outcome"] == "rejected":
         if attempt.get("returned_instance_id") or attempt.get("instance_id"):
             raise Blocked("Rejection receipt conflicts with a saved instance identity")
+    if attempt.get("create_result") == result:
+        return
+    if result["outcome"] == "created":
+        attempt["returned_instance_id"] = result["instance_id"]
+    elif result["outcome"] == "rejected":
         attempt["create_rejected"] = True
     attempt["create_result"] = result
     save()
     journal.event(kind="create_result_recorded", label=attempt["label"],
-                  outcome=result["outcome"], reason=result.get("reason"), diagnostic=str(path))
+                  outcome=result["outcome"], diagnostic=str(path), **safe_diagnostics(result))
 
 
 def reconcile_create(*, journal: Journal, attempt: dict, save: Callable[[], None],
-                     wait_seconds: float = 0) -> dict:
+                     wait_seconds: float = 0, receipt_path: Path | None = None) -> dict:
     deadline = time.monotonic() + wait_seconds
     while True:
         matches = [record for record in instances(journal) if record.get("label") == attempt["label"]]
@@ -162,7 +197,8 @@ def reconcile_create(*, journal: Journal, attempt: dict, save: Callable[[], None
             raise Blocked(f"Multiple instances match {attempt['label']}; refusing adoption or replacement")
         if time.monotonic() >= deadline:
             result = attempt.get("create_result", {})
-            detail = f"{result.get('reason', 'no durable response retained')}; HTTP {result.get('http_status', 'unknown')}"
+            path = receipt_path or journal.directory / f"create-{attempt['label']}.json"
+            detail = f"diagnostics={json.dumps(safe_diagnostics(result), sort_keys=True)}; receipt={path}"
             raise Blocked(f"Create outcome unknown for {attempt['label']} ({detail}); "
                           "do not issue another create. Resume only reconciles this label; "
                           "persistent absence requires provider-confirmed rejection, not state editing")
@@ -248,7 +284,8 @@ def provision(*, journal: Journal, combo: dict, directory: Path,
             destroy_provisional(journal=journal, attempt=active, save=save)
             continue
         record = reconcile_create(journal=journal, attempt=active, save=save,
-                                  wait_seconds=CREATE_VISIBILITY_SECONDS)
+                                  wait_seconds=CREATE_VISIBILITY_SECONDS,
+                                  receipt_path=directory / f"create-{active['label']}.json")
         identity = active["instance_id"]
         run_dir = REPO / f".vast-train-local/toy-act-{identity}"
         run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -269,7 +306,8 @@ def provision(*, journal: Journal, combo: dict, directory: Path,
             if record.get("actual_status") == "running":
                 break
             time.sleep(10)
-            record = reconcile_create(journal=journal, attempt=active, save=save)
+            record = reconcile_create(journal=journal, attempt=active, save=save,
+                                      receipt_path=directory / f"create-{active['label']}.json")
         else:
             rejected = True
         if rejected:

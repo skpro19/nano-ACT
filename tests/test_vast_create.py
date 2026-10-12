@@ -1,6 +1,7 @@
 """Offline create transport, receipt replay and provider-confirmed recovery tests."""
 
 from copy import deepcopy
+import hashlib
 import io
 import json
 import os
@@ -73,7 +74,7 @@ class ResponseTests(unittest.TestCase):
         expected_payload = {
             "client_id": "me",
             "image": common.IMAGE,
-            "disk": 100,
+            "disk": 100.0,
             "env": {"-p 22:22": "1"},
             "label": LABEL,
             "runtype": "ssh_direc ssh_proxy",
@@ -98,7 +99,8 @@ class ResponseTests(unittest.TestCase):
 
     def test_http_400_invalid_args_remains_unknown(self) -> None:
         error = HTTPError("https://example.invalid/", 400, "error", {},
-                          io.BytesIO(b'{"success":false,"error":"invalid_args"}'))
+                          io.BytesIO(b'{"success":false,"error":"invalid_args",'
+                                     b'"msg":"error 400/3467: Invalid args: \'id\' is required"}'))
         opener = Mock()
         opener.open.side_effect = error
         with patch.dict(os.environ, {"VAST_API_KEY": "test-secret-key"}), \
@@ -108,6 +110,9 @@ class ResponseTests(unittest.TestCase):
         self.assertEqual(result["reason"], "http_error")
         self.assertEqual(result["http_status"], 400)
         self.assertEqual(result["provider_error_code"], "invalid_args")
+        self.assertEqual(result["provider_error_http_code"], 400)
+        self.assertEqual(result["provider_error_id"], 3467)
+        self.assertEqual(result["provider_error_fields"], ["id"])
         opener.open.assert_called_once()
 
     def test_transport_errors_do_not_retry_or_leak_exception(self) -> None:
@@ -140,6 +145,74 @@ class ResponseTests(unittest.TestCase):
             self.assertNotIn("secret-provider-token", json.dumps(result))
             opener.open.assert_called_once()
 
+    def test_local_validation_never_opens_transport(self) -> None:
+        for offer in (True, False, 0, -1, 42.0, "42", None):
+            with self.subTest(offer=offer), patch.object(create_request, "build_opener") as transport:
+                result = create_request.send_create(offer_id=offer, label=LABEL)
+                self.assertEqual(result, {"outcome": "unknown", "reason": "local_validation_failed",
+                                          "validation_category": "identity", "validation_fields": ["offer_id"]})
+                transport.assert_not_called()
+        for label in (None, "unowned", LABEL + "/?token=secret", LABEL + "\n", "toy-act-train-actv2-" + "x" * 129):
+            with self.subTest(label=label), patch.object(create_request, "build_opener") as transport:
+                result = create_request.send_create(offer_id=42, label=label)
+                self.assertEqual(result["reason"], "local_validation_failed")
+                transport.assert_not_called()
+
+    def test_fixed_envelope_validation_excludes_arbitrary_values(self) -> None:
+        baseline = create_request.build_payload(label=LABEL)
+        mutations = {"disk": 100, "env": {"API_KEY": "secret"}, "price": 0,
+                     "image": "https://secret.invalid", "force": 0, "label": "secret"}
+        for field in baseline:
+            mutations.setdefault(field, "secret")
+        for field, value in {**mutations, "unknown": "secret"}.items():
+            payload = {**baseline, field: value}
+            with self.subTest(field=field), \
+                    patch.object(create_request, "build_payload", return_value=payload), \
+                    patch.object(create_request, "build_opener") as transport:
+                result = create_request.send_create(offer_id=42, label=LABEL)
+                self.assertEqual(result["reason"], "local_validation_failed")
+                self.assertNotIn("secret", json.dumps(result))
+                self.assertNotIn("request_snapshot", result)
+                self.assertEqual(result["validation_category"],
+                                 "envelope_shape" if field == "unknown" else "envelope_value")
+                self.assertEqual(result["validation_fields"], [] if field == "unknown" else [field])
+                transport.assert_not_called()
+
+    def test_snapshot_is_deterministic_and_credential_free(self) -> None:
+        results = []
+        for key in ("secret-one", "secret-two"):
+            with patch.dict(os.environ, {"VAST_API_KEY": key, "OTHER_SECRET": "hidden"}), \
+                    patch.object(create_request, "build_opener", side_effect=AssertionError("must not construct")):
+                # No credentials returns diagnostics without transport.
+                with patch.dict(os.environ, {"VAST_API_KEY": ""}):
+                    results.append(create_request.send_create(offer_id=42, label=LABEL))
+        self.assertEqual(results[0], results[1])
+        result = results[0]
+        snapshot = result["request_snapshot"]
+        self.assertEqual(snapshot, {"offer_id": 42, "payload": create_request.build_payload(label=LABEL)})
+        canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+        self.assertEqual(result["request_snapshot_sha256"], hashlib.sha256(canonical).hexdigest())
+        for secret in ("secret-one", "secret-two", "hidden", "Authorization", "https://"):
+            self.assertNotIn(secret, json.dumps(result))
+
+    def test_provider_message_only_retains_narrow_numeric_and_field_diagnostics(self) -> None:
+        message = ("error 400/3467: Invalid args: 'id' is required; 'disk' 'id' "
+                   "'api_key' 'password' 'unknown' https://secret.invalid?token=secret "
+                   "Bearer secret 123456789 99999")
+        result = create_request.classify_response(status=400, body=json.dumps({"msg": message}).encode())
+        self.assertEqual(result["provider_error_http_code"], 400)
+        self.assertEqual(result["provider_error_id"], 3467)
+        self.assertEqual(result["provider_error_fields"], ["disk", "id"])
+        for text in ("secret", "api_key", "password", "unknown'", "https://", "123456789", "99999", "msg"):
+            self.assertNotIn(text, json.dumps(result))
+        for message in ("error 400/123456789: 'id'", "error 400/3467evil: 'id'",
+                        "URL https://error 400/3467: 'id'", "error 400: 'id'", "token 3467 'id'"):
+            result = create_request.classify_response(status=400, body=json.dumps({"msg": message}).encode())
+            self.assertFalse(any(key.startswith("provider_") for key in result))
+        message = "error 400/3467: " + " ".join(repr(field) for field in create_request.SAFE_PAYLOAD_FIELDS)
+        result = create_request.classify_response(status=400, body=json.dumps({"msg": message}).encode())
+        self.assertEqual(len(result["provider_error_fields"]), create_request.MAX_DIAGNOSTIC_FIELDS)
+
     def test_redirects_are_not_followed(self) -> None:
         self.assertIsNone(create_request.NoRedirects().redirect_request(None, None, 302, "", {}, "https://elsewhere.invalid"))
 
@@ -170,8 +243,11 @@ class ReceiptTests(unittest.TestCase):
     def test_receipt_replays_after_interruption_without_create(self) -> None:
         common.write_json(path=self.path, value={"version": 1, "label": LABEL, "offer_id": 42,
                                                 "outcome": "rejected", "reason": "explicit_rejection"})
+        original = self.path.read_bytes()
         save = Mock()
         provision.restore_create_result(journal=self.journal, attempt=self.attempt, directory=self.directory, save=save)
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertNotIn("request_snapshot", self.attempt["create_result"])
         self.assertTrue(self.attempt["create_rejected"])
         save.assert_called_once()
 
@@ -192,6 +268,83 @@ class ReceiptTests(unittest.TestCase):
         provision.restore_create_result(journal=self.journal, attempt=self.attempt, directory=self.directory, save=Mock())
         self.assertNotIn("create_rejected", self.attempt)
         self.assertNotIn("returned_instance_id", self.attempt)
+
+    def test_receipt_diagnostics_are_revalidated_for_journal_and_block_message(self) -> None:
+        result = {"version": 1, "label": LABEL, "offer_id": 42, "outcome": "unknown",
+                  "reason": "https://secret.invalid", "http_status": "secret",
+                  "provider_error_code": "secret", "provider_error_id": True,
+                  "provider_error_fields": ["id", "secret", "id"],
+                  "provider_error_http_code": True,
+                  "validation_category": "secret", "validation_fields": ["secret"],
+                  "response_bytes": True, "response_sha256": "secret",
+                  "recorded_at": "secret", "arbitrary": {"api_key": "secret"}}
+        common.write_json(path=self.path, value=result)
+        with patch.object(self.journal, "event") as event:
+            provision.restore_create_result(journal=self.journal, attempt=self.attempt,
+                                            directory=self.directory, save=Mock())
+        self.assertNotIn("secret", json.dumps(event.call_args.kwargs))
+        self.assertNotIn("secret", json.dumps(self.attempt))
+        self.assertNotIn("arbitrary", self.attempt["create_result"])
+        self.assertNotIn("recorded_at", self.attempt["create_result"])
+        self.assertEqual(event.call_args.kwargs["diagnostic"], str(self.path))
+        self.assertEqual(event.call_args.kwargs["provider_error_fields"], ["id"])
+        with patch.object(provision, "instances", return_value=[]):
+            with self.assertRaises(common.Blocked) as blocked:
+                provision.reconcile_create(journal=self.journal, attempt=self.attempt, save=Mock())
+        self.assertNotIn("secret", str(blocked.exception))
+        self.assertIn(str(self.path), str(blocked.exception))
+        self.attempt["create_result"].update(reason="http_error", http_status=400,
+                                             provider_error_http_code=400, provider_error_id=3467)
+        with patch.object(provision, "instances", return_value=[]):
+            with self.assertRaises(common.Blocked) as blocked:
+                provision.reconcile_create(journal=self.journal, attempt=self.attempt, save=Mock())
+        self.assertIn("3467", str(blocked.exception))
+        self.assertIn("400", str(blocked.exception))
+
+    def test_valid_snapshot_replays_and_receipt_is_unchanged(self) -> None:
+        snapshot = create_request.request_snapshot(offer_id=42, label=LABEL,
+                                                  payload=create_request.build_payload(label=LABEL))
+        digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        receipt = {"version": 1, "label": LABEL, "offer_id": 42, "outcome": "created",
+                   "instance_id": 123, "request_snapshot": snapshot, "request_snapshot_sha256": digest,
+                   "response_bytes": 42, "response_sha256": "a" * 64}
+        common.write_json(path=self.path, value=receipt)
+        original = self.path.read_bytes()
+        provision.restore_create_result(journal=self.journal, attempt=self.attempt, directory=self.directory, save=Mock())
+        self.assertEqual(self.attempt["create_result"], receipt)
+        self.assertEqual(self.attempt["returned_instance_id"], 123)
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_invalid_snapshots_block_before_any_outcome_effect(self) -> None:
+        snapshot = create_request.request_snapshot(offer_id=42, label=LABEL,
+                                                  payload=create_request.build_payload(label=LABEL))
+        base = {"request_snapshot": snapshot, "request_snapshot_sha256": hashlib.sha256(
+            json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+        invalid = [deepcopy(base) for _ in range(10)]
+        invalid[0]["request_snapshot"]["offer_id"] = 43
+        invalid[1]["request_snapshot"]["payload"]["label"] = "secret"
+        invalid[2]["request_snapshot"]["payload"]["disk"] = 100
+        invalid[3]["request_snapshot"]["payload"]["api_key"] = "secret"
+        invalid[4]["request_snapshot"]["extra"] = "secret"
+        invalid[5]["request_snapshot_sha256"] = "0" * 64
+        invalid[6]["request_snapshot_sha256"] = "secret"
+        del invalid[7]["request_snapshot"]
+        del invalid[8]["request_snapshot_sha256"]
+        invalid[9]["request_snapshot"]["offer_id"] = True
+        for outcome in ("created", "rejected"):
+            for diagnostics in invalid:
+                with self.subTest(outcome=outcome, diagnostics=diagnostics):
+                    receipt = {"version": 1, "label": LABEL, "offer_id": 42,
+                               "outcome": outcome, "instance_id": 123, **diagnostics}
+                    common.write_json(path=self.path, value=receipt)
+                    original = deepcopy(self.attempt)
+                    save = Mock()
+                    with self.assertRaises(common.Blocked) as blocked:
+                        provision.restore_create_result(journal=self.journal, attempt=self.attempt,
+                                                        directory=self.directory, save=save)
+                    self.assertNotIn("secret", str(blocked.exception))
+                    self.assertEqual(self.attempt, original)
+                    save.assert_not_called()
 
     def test_missing_historical_receipt_does_not_invent_rejection(self) -> None:
         provision.restore_create_result(journal=self.journal, attempt=self.attempt, directory=self.directory, save=Mock())
