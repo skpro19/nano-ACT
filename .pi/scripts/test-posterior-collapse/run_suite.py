@@ -8,13 +8,12 @@ local `checkpoints/act_v2` mirrors can be partial, so each run's latest step is
 resolved against the bucket and downloaded into the local mirror before its
 tests run.
 
-    uv run scripts/utils/posterior-collpase/run_suite.py --iteration i526a92dd6741 --tests 1 2 3 4
-    uv run scripts/utils/posterior-collpase/run_suite.py --run 0000/2026-10-12_10-36-35_slug-i526a92dd6741
+    uv run .pi/scripts/test-posterior-collapse/run_suite.py --iteration i526a92dd6741 --tests 1 2 3 4
+    uv run .pi/scripts/test-posterior-collapse/run_suite.py --run 0000/2026-10-12_10-36-35_slug-i526a92dd6741
 
 `--step` pins one checkpoint step for every run instead of using each run's
-latest. `--tests` defaults to every known test id. Tests 2 and 3 have no runner
-yet, and test 4 is implemented only by the checkpoint-pinned `run_test4.py`, so
-both are reported and skipped rather than silently ignored.
+latest. `--tests` defaults to every known test id. Tests 2–4 reuse verified
+test-1 arrays; the prerequisite is prepared automatically when absent.
 """
 from pathlib import Path
 from typing import Any
@@ -37,7 +36,6 @@ BUCKET_CHECKPOINT_PREFIX = os.environ.get('TOY_ACT_CHECKPOINT_PREFIX', 'checkpoi
 BUCKET_REGION = os.environ.get('TOY_ACT_AWS_REGION', 'ap-south-1')
 BUCKET_PROFILE = os.environ.get('TOY_ACT_AWS_PROFILE', 'toy-pickplace-backup')
 ALL_TESTS = (1, 2, 3, 4)
-UNIMPLEMENTED = (2, 3)
 STEP_CHECKPOINT = re.compile(r'step_(\d+)\.pt')
 # TensorBoard publishes each run as <combo-id>/<run-name>; the run name always
 # ends in the owning iteration's `-i<12 hex>` token.
@@ -201,10 +199,11 @@ def parse_tests(*, values: list[str]) -> list[int]:
     return sorted(set(tests))
 
 
-def pinned_checkpoint() -> Path:
-    """The checkpoint that the checkpoint-pinned test-4 runner uses."""
-    import run_test4
-    return Path(run_test4.CHECKPOINT)
+def dispatch_tests(*, tests: list[int], output: Path) -> list[int]:
+    """Prepend the sampling prerequisite when later tests lack test-1 results."""
+    if any(test > 1 for test in tests) and 1 not in tests and not (output / 'test-1/results.json').exists():
+        return [1, *tests]
+    return tests
 
 
 def run(*, command: list[str], dry_run: bool) -> None:
@@ -267,27 +266,25 @@ def main() -> None:
                                              checkpoint_stem=checkpoint.stem, tag=tag)
         label = f'{run_name} [{tag or "no tag"}] @ {checkpoint.stem}'
         print(f'RUN {label}', flush=True)
-        for test in tests:
+        for test in dispatch_tests(tests=tests, output=output):
             try:
                 if test == 1:
-                    command = ['uv', 'run', 'scripts/utils/posterior-collpase/run_test1.py',
+                    command = ['uv', 'run', '.pi/scripts/test-posterior-collapse/run_test1.py',
                                '--iteration', iteration, '--checkpoint', str(checkpoint)]
                     if train_commit:
                         command += ['--train-commit', train_commit]
                     run(command=command, dry_run=args.dry_run)
-                    run(command=['uv', 'run', 'scripts/utils/posterior-collpase/plot_test1.py',
+                    run(command=['uv', 'run', '.pi/scripts/test-posterior-collapse/plot_test1.py',
                                  '--checkpoint-dir', str(output)], dry_run=args.dry_run)
-                elif test in UNIMPLEMENTED:
-                    print(f'SKIP {label} test-{test}: no runner implemented', flush=True)
                 else:
-                    pinned = pinned_checkpoint()
-                    if checkpoint.resolve() != pinned.resolve():
-                        print(f'SKIP {label} test-4: run_test4.py is pinned to {pinned}', flush=True)
-                    else:
-                        run(command=['uv', 'run', 'scripts/utils/posterior-collpase/run_test4.py'],
-                            dry_run=args.dry_run)
-                        run(command=['uv', 'run', 'scripts/utils/posterior-collpase/plot_test4.py'],
-                            dry_run=args.dry_run)
+                    command = ['uv', 'run', f'.pi/scripts/test-posterior-collapse/run_test{test}.py',
+                               '--iteration', iteration, '--checkpoint', str(checkpoint)]
+                    if train_commit:
+                        command += ['--train-commit', train_commit]
+                    run(command=command, dry_run=args.dry_run)
+                    if test == 4:
+                        run(command=['uv', 'run', '.pi/scripts/test-posterior-collapse/plot_test4.py',
+                                     '--checkpoint-dir', str(output)], dry_run=args.dry_run)
             except subprocess.CalledProcessError as error:
                 print(f'FAIL {label} test-{test}: exit {error.returncode}', flush=True)
                 failed.append((label, test))

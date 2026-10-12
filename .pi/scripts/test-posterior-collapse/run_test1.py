@@ -21,7 +21,6 @@ import sys
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / 'debug' / 'posterior-tests-refined'))
 
 import h5py
 import numpy as np
@@ -32,7 +31,7 @@ from scripts.dataset import build_proprio
 from scripts.models.act_v2.config import D_MODEL, N_HEAD, NUM_LAYERS, PROPRIO_DIMS, Z_DIMS
 from scripts.models.act_v2.model import ACTV2
 from scripts.utils.analyze_z import normalization_from_checkpoint
-from run_audit import posterior_summary, tensor
+from audit_helpers import posterior_summary, tensor
 import layout
 
 # Historical ph100/full pair; still imported by run_test4.py and used as the
@@ -84,7 +83,9 @@ def build_splits(*, train_dataset, held_out_dataset):
         train_names = demo_names(train)
         train_hashes = {name: trajectory_hash(train['data'][name]) for name in train_names}
     provenance = {'train_dataset': str(train_dataset), 'train_hashes': train_hashes,
-                  'train_demos': len(train_names), 'hash_fields': LOWDIM}
+                  'train_demos': len(train_names), 'hash_fields': list(LOWDIM),
+                  'dataset_sha256': {str(path): file_hash(path) for path in
+                                     (train_dataset, held_out_dataset) if path is not None}}
     if held_out_dataset is None:
         provenance['status'] = ('training demonstrations only; every demo in the recorded '
                                 'dataset was trained on, so no held-out split is claimed')
@@ -209,7 +210,7 @@ def run_posterior(*, model, checkpoint, checkpoint_sha, split, dataset, names, s
                         demo=demos, timestep=np.array([t for _, t in ids]), selected=selected,
                         valid_steps=masks.sum(1), **matching)
     save_json(path=destination / 'metadata.json', value={
-        'split': split, 'seed': seed, 'dataset': str(dataset), 'k': k,
+        'split': split, 'seed': seed, 'dataset': str(dataset), 'dataset_sha256': file_hash(dataset), 'k': k,
         'action_mode': action_mode, 'action_dims': action_dims,
         'beta': config['beta'], 'lr': config['lr'], 'step': checkpoint['global_step'],
         'posterior_examples': len(ids), 'intervention_examples': len(selected),
@@ -219,6 +220,41 @@ def run_posterior(*, model, checkpoint, checkpoint_sha, split, dataset, names, s
         'config': config, 'strict_load': True, 'checkpoint_sha256': checkpoint_sha,
         'posterior_per_demo': POSTERIOR_PER_DEMO, 'selected_per_demo': SELECTED_PER_DEMO,
         'arrays_sha256': file_hash(destination / 'arrays.npz')})
+
+
+def validate_bank(*, model, checkpoint, checkpoint_sha, split, dataset, names, seed, folder):
+    """Validate every saved bank by full reencoding and rematching."""
+    meta = json.loads((folder / 'metadata.json').read_text())
+    expected = {'checkpoint_sha256': checkpoint_sha, 'config': checkpoint['config'],
+                'normalization': {key: np.asarray(value).tolist() for key, value in checkpoint['normalization'].items()},
+                'split': split, 'seed': seed, 'dataset': str(dataset),
+                'k': checkpoint['config']['action_chunk_size'],
+                'arrays_sha256': file_hash(folder / 'arrays.npz')}
+    for key, value in expected.items():
+        if meta.get(key) != value:
+            raise RuntimeError(f'Test 1 provenance mismatch ({key}): {folder}')
+    if 'dataset_sha256' in meta:
+        if meta['dataset_sha256'] != file_hash(dataset):
+            raise RuntimeError(f'Test 1 dataset hash mismatch: {folder}')
+    normalization = normalization_from_checkpoint(checkpoint=checkpoint)
+    with h5py.File(dataset) as hdf5:
+        ids, selected, proprios, actions, masks = sample_examples(
+            hdf5=hdf5, names=names, k=expected['k'], normalization=normalization,
+            action_mode=checkpoint['config'].get('action_mode', 'joint_position_aperture'), seed=seed)
+    demos = np.array([name for name, _ in ids])
+    mu, logvar = encode_posterior(model=model, proprios=proprios, actions=actions, masks=masks)
+    matching = observation_matching(proprios=proprios, actions=actions, masks=masks,
+                                    demos=demos, selected=selected, seed=seed)
+    with np.load(folder / 'arrays.npz') as saved:
+        for key, value in {'demo': demos, 'timestep': np.array([time for _, time in ids]),
+                           'selected': selected, 'valid_steps': masks.sum(1), **matching}.items():
+            if value.dtype.kind in 'f':
+                np.testing.assert_allclose(saved[key], value, rtol=1e-6, atol=1e-7)
+            else:
+                np.testing.assert_array_equal(saved[key], value)
+        for key, value in {'mu': mu, 'logvar': logvar, 'sigma': np.exp(logvar / 2)}.items():
+            np.testing.assert_allclose(saved[key], value, rtol=1e-4, atol=2e-6)
+    print(f'VALIDATED full posterior/donor bank {folder}', flush=True)
 
 
 def summarize_values(values):
@@ -376,8 +412,6 @@ def main():
         output_root=args.output_root, iteration=args.iteration,
         checkpoint_stem=args.checkpoint.stem, tag=tag) / 'test-1'
     layout.assert_checkpoint(directory=destination, checkpoint_sha=checkpoint_sha)
-    destination.mkdir(parents=True, exist_ok=True)
-    (destination / 'checkpoint.sha256').write_text(f'{checkpoint_sha}  {args.checkpoint.name}\n')
 
     representation = resolve_checkpoint_representation(checkpoint=checkpoint)
     train_dataset = resolve_train_dataset(checkpoint=checkpoint, override=args.dataset)
@@ -385,8 +419,13 @@ def main():
                                                 override=args.held_out_dataset)
 
     splits, provenance = build_splits(train_dataset=train_dataset, held_out_dataset=held_out_dataset)
-    save_json(path=destination / 'provenance.json', value=provenance)
-    save_json(path=destination / 'compatibility.json', value={
+    previous = destination / 'provenance.json'
+    if previous.exists():
+        saved = json.loads(previous.read_text())
+        expected = {key: value for key, value in provenance.items() if key != 'dataset_sha256' or key in saved}
+        if saved != expected:
+            raise RuntimeError(f'Refusing incompatible Test 1 provenance: {previous}')
+    save_compatibility = {
         'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
         'training_commit': args.train_commit,
         'act_v2_diff_vs_training_commit': subprocess.check_output(
@@ -394,12 +433,30 @@ def main():
              'scripts/dataset.py', 'scripts/action_modes.py', 'scripts/utils/analyze_z.py'],
             text=True) if args.train_commit else None,
         'config_tag': tag,
-        'scope': 'evaluation code subset only'})
+        'scope': 'evaluation code subset only',
+        'code_sha256': {str(path): file_hash(path) for path in
+                        (Path(__file__), Path(__file__).with_name('audit_helpers.py'))}}
 
     torch.manual_seed(42)
     model = build_model(checkpoint=checkpoint, representation=representation)
     dataset_for_split = {'train': train_dataset, 'held-out-candidate': held_out_dataset}
 
+    # Validate all saved banks before changing any provenance or results.
+    for split, names in splits.items():
+        for seed in SEEDS:
+            folder = destination / split / f'seed-{seed}'
+            if folder.exists() and any(folder.iterdir()):
+                validate_bank(model=model, checkpoint=checkpoint, checkpoint_sha=checkpoint_sha,
+                              split=split, dataset=dataset_for_split[split], names=names,
+                              seed=seed, folder=folder)
+                if args.force:
+                    raise RuntimeError(f'Refusing to overwrite preserved output: {folder}')
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / 'checkpoint.sha256').write_text(f'{checkpoint_sha}  {args.checkpoint.name}\n')
+    save_json(path=destination / 'provenance.json', value=provenance)
+    # Compatibility records the original producer, not the code validating a resume.
+    if not (destination / 'compatibility.json').exists():
+        save_json(path=destination / 'compatibility.json', value=save_compatibility)
     results = {}
     for split, names in splits.items():
         files = []

@@ -14,7 +14,6 @@ import time
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / 'debug/posterior-tests-refined'))
 
 import h5py
 import numpy as np
@@ -23,16 +22,11 @@ import torch
 from scripts.dataset import images_to_tensor
 from scripts.models.act_v2.model import ACTV2
 from scripts.utils.analyze_z import normalization_from_checkpoint
-from run_audit import gather, tensor, valid_l1
-from run_test1 import SEEDS, TRAIN, FULL, file_hash, save_json
+from audit_helpers import tensor, valid_l1, verify_resume
+from run_test1 import SEEDS, file_hash, save_json
+from interventions import arguments, prepare, load_source, read_target
 import layout
 
-CHECKPOINT = Path('checkpoints/act_v2/2026-10-12_06-37-34_k100_bs32_lr1e-05_beta10_wu0_st100000_img_av-eih_z1_ds_ph_av_eih_ph100_s0_l1-i126b6719b252/step_000022000.pt')
-ITERATION = CHECKPOINT.parent.name.rsplit('-', 1)[1]
-ROOT = layout.checkpoint_directory(
-    output_root=layout.OUTPUT_ROOT, iteration=ITERATION, checkpoint_stem=CHECKPOINT.stem,
-    tag=layout.tag_for_run(iteration=ITERATION, run_name=CHECKPOINT.parent.name))
-SPLITS = ('train', 'held-out-candidate')
 PAIRS = np.array(list(itertools.combinations(range(5), 2)))
 METRICS = ('random_vs_zero', 'random_vs_random', 'posterior_mean_vs_zero')
 THRESHOLD = .002
@@ -71,44 +65,34 @@ def report(*, result, label):
     return '\n'.join(lines) + '\n'
 
 
-def read_target(*, hdf5, demo, timestep, config, normalization):
-    proprio, action, mask = gather(demo=hdf5[f'data/{demo}'], timestep=int(timestep),
-                                   k=100, normalization=normalization)
-    frames = images_to_tensor(images=[hdf5[f'data/{demo}/obs/{key}'][int(timestep)]
-                                      for key in config['image_keys']])
-    return proprio, action, mask, frames
-
-
 @torch.inference_mode()
-def execute_seed(*, model, checkpoint, split, seed, folder, identity):
+def execute_seed(*, model, checkpoint, root, dataset, split, seed, folder, identity):
     started = time.time()
-    source = ROOT / 'test-1' / split / f'seed-{seed}'
-    meta = json.loads((source / 'metadata.json').read_text())
-    assert meta['checkpoint_sha256'] == identity['checkpoint_sha256']
-    assert meta['arrays_sha256'] == file_hash(source / 'arrays.npz')
-    assert meta['k'] == 100 and meta['seed'] == seed and meta['split'] == split
-    assert meta['normalization'] == {key: np.asarray(value).tolist()
-                                      for key, value in checkpoint['normalization'].items()}
-    with np.load(source / 'arrays.npz') as original:
-        selected = original['selected'].copy()
-        demos = original['demo'][selected].copy()
-        timesteps = original['timestep'][selected].copy()
-        own_mu = original['mu'][selected].copy()
-        valid_steps = original['valid_steps'][selected].copy()
-    assert len(selected) == 200 and len(np.unique(selected)) == 200
-    assert len(np.unique(demos)) == 100
-    assert all((demos == name).sum() == 2 for name in np.unique(demos))
+    source, meta, original = load_source(root=root, checkpoint=checkpoint, identity=identity,
+                                         split=split, seed=seed, dataset=dataset)
+    execution = {**identity, 'split': split, 'seed': seed,
+                 'test1_arrays_sha256': file_hash(source / 'arrays.npz'),
+                 'test1_metadata_sha256': file_hash(source / 'metadata.json')}
+    if verify_resume(destination=folder, identity=execution):
+        with np.load(folder / 'arrays.npz') as saved:
+            return {key: saved[key].copy() for key in saved.files}
+    selected = original['selected']
+    demos = original['demo'][selected]
+    timesteps = original['timestep'][selected]
+    own_mu = original['mu'][selected]
+    valid_steps = original['valid_steps'][selected]
+    count = len(selected)
+    k = checkpoint['config']['action_chunk_size']
     normalization = normalization_from_checkpoint(checkpoint=checkpoint)
     # CPU generator: each (target, draw, dimension) is an independently drawn value.
     generator = torch.Generator(device='cpu').manual_seed(seed)
-    latents = torch.randn((200, 5, model.z_dims), generator=generator, dtype=torch.float32).numpy()
+    latents = torch.randn((count, 5, model.z_dims), generator=generator, dtype=torch.float32).numpy()
     assert all(np.all(np.any(latents[:, i] != latents[:, j], axis=1)) for i, j in PAIRS)
     predictions, masks, mus = [], [], []
     differences = {key: [] for key in METRICS}
-    dataset = TRAIN if split == 'train' else FULL
     with h5py.File(dataset) as hdf5:
-        for start in range(0, 200, 8):
-            positions = range(start, min(start + 8, 200))
+        for start in range(0, count, 8):
+            positions = range(start, min(start + 8, count))
             rows = [read_target(hdf5=hdf5, demo=demos[p], timestep=timesteps[p],
                                 config=checkpoint['config'], normalization=normalization) for p in positions]
             proprio, action, mask = [np.stack([row[i] for row in rows]) for i in range(3)]
@@ -140,10 +124,12 @@ def execute_seed(*, model, checkpoint, split, seed, folder, identity):
         differences = {key: np.concatenate(value) for key, value in differences.items()}
         np.testing.assert_array_equal(masks.sum(1), valid_steps)
         lengths = np.array([len(hdf5[f'data/{name}/next_obs/robot0_joint_pos']) for name in demos])
-        np.testing.assert_array_equal(masks, np.arange(100)[None] < np.minimum(100, lengths - timesteps)[:, None])
+        np.testing.assert_array_equal(masks, np.arange(k)[None] < np.minimum(k, lengths - timesteps)[:, None])
         # Independent selection stream, includes padded and full chunks explicitly.
-        checks = list(np.random.default_rng(seed + 9841).choice(200, size=3, replace=False))
-        checks += [int(np.flatnonzero(valid_steps < 100)[0]), int(np.flatnonzero(valid_steps == 100)[0])]
+        checks = list(np.random.default_rng(seed + 9841).choice(count, size=min(3, count), replace=False))
+        for eligible in (valid_steps < k, valid_steps == k):
+            if eligible.any():
+                checks.append(int(np.flatnonzero(eligible)[0]))
         validation = []
         for pos in sorted(set(checks)):
             proprio, action, mask, frames = read_target(hdf5=hdf5, demo=demos[pos], timestep=timesteps[pos],
@@ -161,7 +147,7 @@ def execute_seed(*, model, checkpoint, split, seed, folder, identity):
         recomputed, poisoned = [], []
         comparisons = [(i + 2, 0) for i in range(5)] if key == 'random_vs_zero' else [
             (i + 2, j + 2) for i, j in PAIRS] if key == 'random_vs_random' else [(1, 0)]
-        for pos in range(200):
+        for pos in range(count):
             row = predictions[pos].astype(np.float64)
             valid = int(valid_steps[pos])
             recomputed.append([np.abs(row[i, :valid] - row[j, :valid]).mean() for i, j in comparisons])
@@ -171,13 +157,13 @@ def execute_seed(*, model, checkpoint, split, seed, folder, identity):
         np.testing.assert_allclose(recomputed, differences[key], rtol=2e-6, atol=1e-9)
         np.testing.assert_array_equal(recomputed, poisoned)
         altered = predictions.copy()
-        for pos in range(200):
+        for pos in range(count):
             altered[pos, :, int(valid_steps[pos]):] = np.arange(7)[:, None, None] * 1e6
         altered_tensor = tensor(altered)
         poisoned_helper = torch.stack([valid_l1(left=altered_tensor[:, i], right=altered_tensor[:, j],
                                                mask=tensor(masks)) for i, j in comparisons], 1).cpu().numpy()
         np.testing.assert_allclose(poisoned_helper, differences[key], rtol=2e-6, atol=1e-9)
-    folder.mkdir(parents=True)
+    folder.mkdir(parents=True, exist_ok=True)
     arrays = dict(demo=demos, timestep=timesteps, selected=selected, valid_steps=valid_steps, mask=masks,
                   posterior_mu=own_mu, recomputed_mu=np.concatenate(mus), prior_z=latents,
                   prediction=predictions, random_pairs=PAIRS, **differences)
@@ -186,10 +172,10 @@ def execute_seed(*, model, checkpoint, split, seed, folder, identity):
     save_json(path=folder / 'results.json', value=result)
     (folder / 'summary.md').write_text(report(result=result, label=f'{split}, seed {seed}'))
     save_json(path=folder / 'metadata.json', value={
-        'execution_identity': identity, 'split': split, 'seed': seed, 'k': 100, 'strict_load': True,
+        'execution_identity': execution, 'split': split, 'seed': seed, 'k': k, 'strict_load': True,
         'eval': True, 'dtype': 'float32', 'draws': 5, 'random_pairing': PAIRS.tolist(),
         'prediction_axis': ['zero', 'posterior_mean', 'random_0', 'random_1', 'random_2', 'random_3', 'random_4'],
-        'target_count': 200, 'padded_targets': int((valid_steps < 100).sum()),
+        'target_count': count, 'padded_targets': int((valid_steps < k).sum()),
         'normalization': meta['normalization'], 'test1_source': str(source),
         'test1_arrays_sha256': file_hash(source / 'arrays.npz'),
         'test1_metadata_sha256': file_hash(source / 'metadata.json'),
@@ -205,48 +191,15 @@ def execute_seed(*, model, checkpoint, split, seed, folder, identity):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args()
-    destination = ROOT / 'test-4'
-    # Fail closed: never overwrite, resume, or mix existing/mismatched artifacts.
-    if destination.exists() and any(destination.iterdir()):
-        raise RuntimeError(f'Refusing nonempty output directory: {destination}')
-    destination.mkdir(parents=True, exist_ok=True)
-    torch.set_num_threads(4)
-    torch.manual_seed(42)
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.backends.cudnn.benchmark = False
-    checkpoint = torch.load(CHECKPOINT, map_location='cpu', weights_only=False)
-    assert checkpoint['config']['use_z'] and checkpoint['config']['action_chunk_size'] == 100
-    assert checkpoint['global_step'] == 22000
-    model = ACTV2(action_chunk_size=100, use_z=True).cuda().float().eval()
-    model.load_state_dict(checkpoint['model'], strict=True)
+    args = arguments()
+    checkpoint, model, root, destination, datasets, splits, identity = prepare(args=args, test=4)
     assert not model.training and all(p.dtype == torch.float32 for p in model.parameters())
-    paths = [Path(__file__), Path(__file__).with_name('plot_test4.py'),
-             Path(__file__).with_name('run_test1.py'), Path('debug/posterior-tests-refined/run_audit.py'),
-             Path('scripts/dataset.py'), Path('scripts/utils/analyze_z.py'), Path('pyproject.toml'), Path('uv.lock')]
-    paths += sorted(Path('scripts/models').rglob('*.py'))
-    freeze = subprocess.check_output(['uv', 'pip', 'freeze'], text=True)
-    (destination / 'environment.txt').write_text(freeze)
-    identity = {'checkpoint_path': str(CHECKPOINT), 'checkpoint_sha256': file_hash(CHECKPOINT),
-                'dataset_sha256': {str(path): file_hash(path) for path in (TRAIN, FULL)},
-                'code_sha256': {str(path): file_hash(path) for path in paths},
-                'environment_sha256': file_hash(destination / 'environment.txt'),
-                'runtime': {'python': sys.version, 'platform': platform.platform(), 'torch': torch.__version__,
-                            'numpy': np.__version__, 'h5py': h5py.__version__, 'cuda': torch.version.cuda,
-                            'gpu': torch.cuda.get_device_name(), 'tf32': False},
-                'git_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-                'git_status': subprocess.check_output(['git', 'status', '--short'], text=True),
-                'command': 'uv run scripts/utils/posterior-collpase/run_test4.py',
-                'start_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
-    save_json(path=destination / 'provenance.json', value=identity)
     results = {}
-    for split in SPLITS:
+    for split in splits:
         collected = []
         for seed in SEEDS:
             print(f'START {split} seed={seed}', flush=True)
-            collected.append(execute_seed(model=model, checkpoint=checkpoint, split=split, seed=seed,
+            collected.append(execute_seed(model=model, checkpoint=checkpoint, root=root, dataset=datasets[split], split=split, seed=seed,
                                           folder=destination / split / f'seed-{seed}', identity=identity))
         results[split] = {'combined': summarize(arrays=collected),
                           'by_seed': {str(seed): summarize(arrays=[array]) for seed, array in zip(SEEDS, collected)}}

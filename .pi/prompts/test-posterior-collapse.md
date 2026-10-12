@@ -36,7 +36,7 @@ prefix, region and AWS profile default to `toy-act`, `checkpoints/act_v2`,
 
 ## What runs
 
-`scripts/utils/posterior-collpase/run_suite.py` enumerates every run recorded by
+`.pi/scripts/test-posterior-collapse/run_suite.py` enumerates every run recorded by
 the iteration (or selects the single run named by `$1`), resolves each run's own
 latest checkpoint from the bucket (`--step` pins one step for every run
 instead, and must exist in the bucket), downloads the selected checkpoint into
@@ -51,12 +51,25 @@ a full-iteration run produce identical output paths for the same run.
 | Test | Behaviour |
 |---|---|
 | 1 | `run_test1.py`, then `plot_test1.py` |
-| 2, 3 | no runner implemented yet — reported and skipped |
-| 4 | `run_test4.py`, then `plot_test4.py`, only when the resolved checkpoint is the one that runner pins; otherwise reported and skipped |
+| 2 | `run_test2.py`: arbitrary and observation-matched latent swaps versus own posterior |
+| 3 | `run_test3.py`: zero and prior inference baselines versus own posterior |
+| 4 | `run_test4.py`, then `plot_test4.py --checkpoint-dir <dir>`: decoder sensitivity, all 10 prior-draw pairs |
 
-Do not delete or overwrite an existing output directory. `run_test1.py` resumes
-by skipping seed arrays that already exist and stops if the directory's
-`checkpoint.sha256` names a different checkpoint.
+Tests 2–4 support each checkpoint's recorded dataset, action representation and
+chunk length. They reuse test 1's exact targets and donors after checking the
+checkpoint SHA, configuration, normalization and source-array hashes. The suite
+automatically prepares test 1 when later tests are requested and its results are
+absent. Tests 2/3 separate posterior means from five shared-epsilon sampled
+comparisons and use valid-step normalized L1 with demonstration-grouped paired
+bootstrap intervals (absolute ±0.002 and relative ±2% equivalence thresholds).
+Matched swaps are proprio-matched, not image-matched. Report train separately
+from any held-out-candidate split; do not claim a held-out split for a dataset
+whose demonstrations all belong to training.
+
+Do not delete or overwrite incompatible existing outputs. Tests 2–4 resume only
+with identical execution provenance and verified array hashes; legacy or changed
+artifacts fail closed. `run_test1.py` skips existing seed arrays and refuses a
+checkpoint SHA mismatch; later tests additionally verify its provenance.
 
 ## Workflow
 
@@ -74,9 +87,9 @@ by skipping seed arrays that already exist and stops if the directory's
 
 ```bash
 # iteration token: every run in the sweep
-uv run scripts/utils/posterior-collpase/run_suite.py --iteration "$1" --tests ${@:2}
+uv run .pi/scripts/test-posterior-collapse/run_suite.py --iteration "$1" --tests ${@:2}
 # run name: only that run
-uv run scripts/utils/posterior-collpase/run_suite.py --run "$1" --tests ${@:2}
+uv run .pi/scripts/test-posterior-collapse/run_suite.py --run "$1" --tests ${@:2}
 ```
 
 - Pass exactly one of `--iteration` / `--run`, matching the form of `$1`.

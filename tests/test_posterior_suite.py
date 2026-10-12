@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / 'scripts' / 'utils' / 'posterior-collpase'))
+sys.path.insert(0, str(REPO / '.pi' / 'scripts' / 'test-posterior-collapse'))
 
 import run_suite
 
@@ -53,6 +53,21 @@ class ParseTestsTests(unittest.TestCase):
     def test_unknown_id_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             run_suite.parse_tests(values=['9'])
+
+
+class DispatchTestsTests(unittest.TestCase):
+    def test_later_tests_add_missing_sampling_prerequisite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            self.assertEqual(run_suite.dispatch_tests(tests=[2, 3, 4], output=Path(temporary)),
+                             [1, 2, 3, 4])
+
+    def test_saved_sampling_results_do_not_duplicate_test_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / 'test-1').mkdir()
+            (output / 'test-1/results.json').write_text('{}')
+            self.assertEqual(run_suite.dispatch_tests(tests=[2, 3, 4], output=output), [2, 3, 4])
+            self.assertEqual(run_suite.dispatch_tests(tests=[1, 2], output=output), [1, 2])
 
 
 class ParseRunReferenceTests(unittest.TestCase):

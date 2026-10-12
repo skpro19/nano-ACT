@@ -5,7 +5,7 @@ every required artifact, populated for all four `i526a92dd6741` config tags. It
 is documentation, not results: replace the stubs when producing a real audit.
 Run from the repository root:
 
-    uv run python scripts/utils/posterior-collpase/make_reference.py
+    uv run python .pi/scripts/test-posterior-collapse/make_reference.py
 """
 from pathlib import Path
 import json
@@ -27,9 +27,9 @@ TEST4_ROOT = ('provenance.json', 'environment.txt', 'results.json', 'summary.md'
               'execution.log', 'plot_execution.log', 'artifact_validation.log', 'execution_notes.md')
 TEST4_SEED = ('arrays.npz', 'metadata.json', 'results.json', 'summary.md',
               '01_decoder_latent_sensitivity.png', 'plot_provenance.json')
-# Tests 2 and 3 have no runner or plot script yet, so only the generic artifacts exist.
-GENERIC_ROOT = ('provenance.json', 'results.json', 'summary.md')
-GENERIC_SEED = ('arrays.npz', 'metadata.json')
+# Tests 2 and 3 emit paired reconstruction summaries, without standalone plots.
+GENERIC_ROOT = ('checkpoint.sha256', 'provenance.json', 'environment.txt', 'results.json', 'summary.md')
+GENERIC_SEED = ('arrays.npz', 'metadata.json', 'results.json', 'summary.md')
 PLACEHOLDER = 'Reference placeholder — replace with the real artifact.\n'
 
 README = """\
@@ -46,11 +46,12 @@ See `notes/posterior-tests.md` for the rules and the per-file description.
 
 - `test-1/` — posterior variation; five plots and one `arrays.npz`/`metadata.json`
   pair per `{split}/seed-{seed}/`.
-- `test-2/`, `test-3/` — no runner or plot script yet, so only the generic
-  `provenance.json`, `results.json`, `summary.md` and per-seed arrays exist.
+- `test-2/`, `test-3/` — paired reconstruction interventions; provenance,
+  environment, checkpoint hash, results and summaries, plus per-seed arrays,
+  metadata, results and summaries. No standalone plot scripts.
 - `test-4/` — decoder sensitivity; one plot and `plot_provenance.json` per
   `{split}/seed-{seed}/`, plus the execution logs at the test root.
-- Regenerate with `uv run python scripts/utils/posterior-collpase/make_reference.py`.
+- Regenerate with `uv run python .pi/scripts/test-posterior-collapse/make_reference.py`.
 """
 
 
