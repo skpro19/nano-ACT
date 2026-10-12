@@ -4,6 +4,7 @@
 ## General Instructions
 - use Context7 when you are not sure or need official implementation details; if Context7 is unavailable, use the closest official upstream documentation source
 - refer `.opencode/rules/git.md` for git related instructions
+- refer `.opencode/rules/sweep-configs.md` for `configs/sweep/*.toml` filename rules (`+` marks swept params, `-` marks fixed ones)
 - for `.canvas.tsx` files, follow `.cursor/rules/canvas.mdc` (design template based on `cs231n-multi-head-attention.canvas.tsx`)
 
 ## Pi Sub-agents
