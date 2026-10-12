@@ -760,7 +760,12 @@ def train(
     action_loss_kind = config["action_loss"]
     action_loss_fn = make_action_loss_fn(action_loss=action_loss_kind)
     denorm_l1_fn = nn.L1Loss(reduction="mean")
-    optimizer = optim.Adam(params=model.parameters(), lr=lr, betas=(0.9, 0.999))
+    optimizer = optim.AdamW(
+        params=model.parameters(),
+        lr=lr,
+        betas=(0.9, 0.999),
+        weight_decay=1e-4,
+    )
     model_parameters = list(model.parameters())
     if log_activations:
         activation_norms, activation_hook_handles = register_activation_norm_hooks(model=model)
