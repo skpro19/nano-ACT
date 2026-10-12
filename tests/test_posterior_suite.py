@@ -1,5 +1,6 @@
 """Suite-driver helpers for the posterior-collapse tests."""
 
+import json
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,80 @@ class ParseTestsTests(unittest.TestCase):
     def test_unknown_id_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             run_suite.parse_tests(values=['9'])
+
+
+class ParseRunReferenceTests(unittest.TestCase):
+    def test_combo_prefixed_run_name(self) -> None:
+        self.assertEqual(
+            run_suite.parse_run_reference(value='0000/2026-01-01_00-00-00_slug-i000000000000'),
+            ('0000', '2026-01-01_00-00-00_slug-i000000000000'))
+
+    def test_bare_run_name(self) -> None:
+        self.assertEqual(
+            run_suite.parse_run_reference(value='2026-01-01_00-00-00_slug-i000000000000'),
+            ('', '2026-01-01_00-00-00_slug-i000000000000'))
+
+    def test_missing_iteration_token_is_rejected(self) -> None:
+        self.assertIsNone(run_suite.parse_run_reference(value='0000/2026-01-01_00-00-00_slug'))
+
+    def test_extra_path_segment_is_rejected(self) -> None:
+        self.assertIsNone(run_suite.parse_run_reference(value='0000/extra/2026-01-01_slug-i000000000000'))
+
+
+class ResolveRunScopeTests(unittest.TestCase):
+    def make_roots(self, *, directory: Path) -> tuple[Path, Path]:
+        iteration_root = directory / 'ablations'
+        checks_root = directory / 'checkpoints'
+        iteration = iteration_root / 'sweep-a' / '20260101T000000Z-aa0000000000'
+        iteration.mkdir(parents=True)
+        (iteration / 'manifest.json').write_text(json.dumps({'combos': [
+            {'id': '0000', 'name': 'slug-iaa0000000000'},
+            {'id': '0001', 'name': 'other-iaa0000000000'}]}))
+        (checks_root / '2026-01-01_00-00-00_slug-iaa0000000000').mkdir(parents=True)
+        return iteration_root, checks_root
+
+    def test_combo_id_selects_the_matching_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            iteration_root, checks_root = self.make_roots(directory=Path(temporary))
+            iteration, combo, run_directory = run_suite.resolve_run_scope(
+                value='0000/2026-01-01_00-00-00_slug-iaa0000000000',
+                iteration_root=iteration_root, checks_root=checks_root)
+            self.assertEqual(iteration, 'iaa0000000000')
+            self.assertEqual(combo['id'], '0000')
+            self.assertEqual(run_directory.name, '2026-01-01_00-00-00_slug-iaa0000000000')
+
+    def test_bare_run_name_matches_by_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            iteration_root, checks_root = self.make_roots(directory=Path(temporary))
+            _, combo, run_directory = run_suite.resolve_run_scope(
+                value='2026-01-01_00-00-00_slug-iaa0000000000',
+                iteration_root=iteration_root, checks_root=checks_root)
+            self.assertEqual(combo['id'], '0000')
+            self.assertEqual(run_directory.name, '2026-01-01_00-00-00_slug-iaa0000000000')
+
+    def test_unknown_combo_id_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            iteration_root, checks_root = self.make_roots(directory=Path(temporary))
+            with self.assertRaises(ValueError):
+                run_suite.resolve_run_scope(
+                    value='0002/2026-01-01_00-00-00_slug-iaa0000000000',
+                    iteration_root=iteration_root, checks_root=checks_root)
+
+    def test_unknown_iteration_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            iteration_root, checks_root = self.make_roots(directory=Path(temporary))
+            with self.assertRaises(ValueError):
+                run_suite.resolve_run_scope(
+                    value='0000/2026-01-01_00-00-00_slug-ibb1111111111',
+                    iteration_root=iteration_root, checks_root=checks_root)
+
+    def test_missing_checkpoint_directory_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            iteration_root, checks_root = self.make_roots(directory=Path(temporary))
+            with self.assertRaises(FileNotFoundError):
+                run_suite.resolve_run_scope(
+                    value='0000/2026-01-01_00-00-00_absent-iaa0000000000',
+                    iteration_root=iteration_root, checks_root=checks_root)
 
 
 class CheckpointSelectionTests(unittest.TestCase):

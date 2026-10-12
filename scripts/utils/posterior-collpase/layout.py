@@ -35,12 +35,13 @@ OUTPUT_ROOT = Path('debug/posterior-collapse')
 SHORT_ITERATION = re.compile(r'i?[0-9a-f]{12}')
 
 
-def locate_iteration(*, iteration: str) -> Path | None:
+def locate_iteration(*, iteration: str, root: Path | None = None) -> Path | None:
     """The saved iteration directory for an `i<12 hex>` token, if unique."""
     if not SHORT_ITERATION.fullmatch(iteration):
         return None
     token = iteration[1:] if iteration.startswith('i') else iteration
-    matches = sorted(ITERATION_ROOT.glob(f'*/*-{token}'))
+    root = ITERATION_ROOT if root is None else Path(root)
+    matches = sorted(root.glob(f'*/*-{token}'))
     return matches[0] if len(matches) == 1 else None
 
 

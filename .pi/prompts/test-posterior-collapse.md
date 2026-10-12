@@ -1,28 +1,38 @@
 ---
-description: Run the posterior-collapse audit tests for one saved sweep iteration
-argument-hint: "<iteration-id> [test-ids...]"
+description: Run the posterior-collapse audit tests for one saved sweep iteration or run
+argument-hint: "<iteration-id | run-name> [test-ids...]"
 ---
 
-Run the posterior-collapse audit suite for the saved sweep iteration `$1`,
-optionally restricted to specific tests `${@:2}` (default `1 2 3 4`).
+Run the posterior-collapse audit suite for the saved sweep iteration `$1`, or for
+one run within it, optionally restricted to specific tests `${@:2}` (default
+`1 2 3 4`).
 
 ## Arguments
 
-- `$1` — required. The short iteration token `i<12 hex>` of a sweep saved under
-  `.vast-train-local/ablations/*/` (for example `i526a92dd6741`); the leading `i`
-  is optional.
+- `$1` — required. Either the short iteration token `i<12 hex>` of a sweep saved
+  under `.vast-train-local/ablations/*/` (for example `i526a92dd6741`; the leading
+  `i` is optional), or a TensorBoard run name. Iteration mode runs every run in
+  the sweep; run mode runs only that one run. The TensorBoard run name is
+  `<combo-id>/<run-name>` exactly as shown in the dashboard (for example
+  `0000/2026-10-12_10-36-35_osc_pose_delta_k10_…-ibeb087d354a2`); the bare
+  `<run-name>` is also accepted.
 - `${@:2}` — optional space-separated test ids chosen from `1 2 3 4`. When
   omitted, all four are attempted.
 
-Reject an iteration token that does not match `i?[0-9a-f]{12}`, an unknown test
-id, or a missing required argument; never guess.
+Reject an argument that is neither an iteration token matching `i?[0-9a-f]{12}`
+nor a run name ending in the iteration token `-i<12 hex>`, an unknown test id, or
+a missing required argument; never guess.
 
 ## What runs
 
 `scripts/utils/posterior-collpase/run_suite.py` enumerates every run recorded by
-the iteration, resolves each run's own latest checkpoint (`--step` pins one step
-for every run instead), derives the tagged output directory with `layout.py`, and
-dispatches each requested test:
+the iteration (or selects the single run named by `$1`), resolves each run's own
+latest checkpoint (`--step` pins one step for every run instead), derives the
+tagged output directory with `layout.py`, and dispatches each requested test.
+
+Both modes write the same per-run artifacts under
+`debug/posterior-collapse/<iteration>/[<config-tag>/]<stem>/`, so a run name and
+a full-iteration run produce identical output paths for the same run.
 
 | Test | Behaviour |
 |---|---|
@@ -37,7 +47,8 @@ by skipping seed arrays that already exist and stops if the directory's
 ## Workflow
 
 1. Require `uv` and run from the repository root.
-2. Validate `$1` and `${@:2}`.
+2. Validate `$1` and `${@:2}`; choose `--iteration "$1"` for an iteration token
+   or `--run "$1"` for a run name.
 3. Run the suite and stream the output. It exits non-zero when a run has no
    local checkpoint or a test fails.
 4. Report a compact summary: per run, the config tag, the resolved checkpoint,
@@ -47,9 +58,13 @@ by skipping seed arrays that already exist and stops if the directory's
 ## Reference implementation
 
 ```bash
+# iteration token: every run in the sweep
 uv run scripts/utils/posterior-collpase/run_suite.py --iteration "$1" --tests ${@:2}
+# run name: only that run
+uv run scripts/utils/posterior-collpase/run_suite.py --run "$1" --tests ${@:2}
 ```
 
+- Pass exactly one of `--iteration` / `--run`, matching the form of `$1`.
 - Omit the test ids to attempt all four.
 - Add `--dry-run` to print the commands without executing them.
 - Add `--step step_000100000` to pin one step for every run instead of each
