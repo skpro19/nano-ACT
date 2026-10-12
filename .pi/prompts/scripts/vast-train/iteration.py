@@ -63,8 +63,8 @@ def locate(*, identity: str, root: Path = ROOT) -> Path:
     if not matches:
         raise Blocked("Iteration ID is missing; use its explicit directory")
     if len(matches) > 1:
-        candidates = ", ".join(f"{path.parent.name}/{path.name}" for path in matches)
-        raise Blocked(f"Iteration ID is ambiguous; choose one of: {candidates}")
+        candidates = ", ".join(sorted(path.name for path in matches))
+        raise Blocked(f"Iteration ID suffix matches {len(matches)} iterations; use a full ID: {candidates}")
     return matches[0].resolve()
 
 
