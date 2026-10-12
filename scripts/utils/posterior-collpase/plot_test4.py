@@ -9,7 +9,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 
-ROOT = Path('debug/posterior-collapse/i126b6719b252/step_000022000/test-4')
+import layout
+
+CHECKPOINT = Path('checkpoints/act_v2/2026-10-12_06-37-34_k100_bs32_lr1e-05_beta10_wu0_st100000_img_av-eih_z1_ds_ph_av_eih_ph100_s0_l1-i126b6719b252/step_000022000.pt')
+ITERATION = CHECKPOINT.parent.name.rsplit('-', 1)[1]
+ROOT = layout.checkpoint_directory(
+    output_root=layout.OUTPUT_ROOT, iteration=ITERATION, checkpoint_stem=CHECKPOINT.stem,
+    tag=layout.tag_for_run(iteration=ITERATION, run_name=CHECKPOINT.parent.name)) / 'test-4'
 KEYS = ('random_vs_zero', 'random_vs_random', 'posterior_mean_vs_zero')
 LABELS = ('Prior draw vs zero', 'Distinct prior draws', 'Posterior mean vs zero')
 COLORS = ('steelblue', 'darkorange', 'seagreen')

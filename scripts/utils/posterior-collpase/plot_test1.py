@@ -140,7 +140,7 @@ def plot_folder(*, folder, step):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint-dir', type=Path, required=True,
-                        help='debug/posterior-collapse/<iteration>/<checkpoint>')
+                        help='debug/posterior-collapse/<iteration>/[<config-tag>/]<checkpoint>')
     args = parser.parse_args()
     step = args.checkpoint_dir.name
     folders = [args.checkpoint_dir / 'test-1' / split / f'seed-{seed}'

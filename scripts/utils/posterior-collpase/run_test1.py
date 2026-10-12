@@ -2,7 +2,8 @@
 
 Reuses the validated posterior/matching helpers from the refined i526 audit so
 normalization, masking, sampling and donor selection keep identical semantics.
-Outputs land under debug/posterior-collapse/<iteration>/<checkpoint>/test-1/.
+Outputs land under debug/posterior-collapse/<iteration>/[<config_tag>/]<checkpoint>/test-1/,
+where the config tag names the sweep's varying [grid] parameters (see layout.py).
 
 Action representation (mode, action/proprio dimensions), training dataset and
 normalization are read from the checkpoint, so the runner covers both the
@@ -32,6 +33,7 @@ from scripts.models.act_v2.config import D_MODEL, N_HEAD, NUM_LAYERS, PROPRIO_DI
 from scripts.models.act_v2.model import ACTV2
 from scripts.utils.analyze_z import normalization_from_checkpoint
 from run_audit import posterior_summary, tensor
+import layout
 
 # Historical ph100/full pair; still imported by run_test4.py and used as the
 # default held-out relationship when a checkpoint records the ph100 dataset.
@@ -259,9 +261,9 @@ def summarize_split(*, files):
             'files': [str(file) for file in files]}
 
 
-def report(*, results, iteration, checkpoint, checkpoint_sha, train_commit, action_mode, has_held_out):
+def report(*, results, iteration, tag, checkpoint, checkpoint_sha, train_commit, action_mode, has_held_out):
     lines = ['# Test 1 — posterior variation', '',
-             f'Iteration `{iteration}`, checkpoint `{checkpoint}` '
+             f'Iteration `{iteration}`, config tag `{tag or "none"}`, checkpoint `{checkpoint}` '
              f'(sha256 `{checkpoint_sha[:16]}…`, training commit `{train_commit[:8]}`, '
              f'action mode `{action_mode}`).', '',
              '**Question:** does the encoder produce example-specific posterior distributions (`mu`, `sigma`)?',
@@ -355,20 +357,28 @@ def main():
                         help="training dataset; defaults to the checkpoint's recorded dataset")
     parser.add_argument('--held-out-dataset', type=Path, default=None,
                         help='optional full dataset used to build a held-out-candidate split')
-    parser.add_argument('--output-root', type=Path, default=Path('debug/posterior-collapse'))
+    parser.add_argument('--output-root', type=Path, default=layout.OUTPUT_ROOT)
+    parser.add_argument('--tag', default=None,
+                        help='explicit config tag; overrides sweep derivation')
+    parser.add_argument('--sweep', type=Path, default=None,
+                        help='sweep spec used to derive the tag when the saved iteration is unavailable')
     parser.add_argument('--train-commit', default='')
     parser.add_argument('--force', action='store_true')
     args = parser.parse_args()
 
     torch.set_num_threads(4)
-    destination = args.output_root / args.iteration / args.checkpoint.stem / 'test-1'
-    destination.mkdir(parents=True, exist_ok=True)
-    checkpoint_sha = file_hash(args.checkpoint)
-    (destination / 'checkpoint.sha256').write_text(f'{checkpoint_sha}  {args.checkpoint.name}\n')
-
     checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     config = checkpoint['config']
     assert config['use_z']
+    checkpoint_sha = file_hash(args.checkpoint)
+    tag = layout.resolve_tag(iteration=args.iteration, config=config, sweep=args.sweep, tag=args.tag)
+    destination = layout.checkpoint_directory(
+        output_root=args.output_root, iteration=args.iteration,
+        checkpoint_stem=args.checkpoint.stem, tag=tag) / 'test-1'
+    layout.assert_checkpoint(directory=destination, checkpoint_sha=checkpoint_sha)
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / 'checkpoint.sha256').write_text(f'{checkpoint_sha}  {args.checkpoint.name}\n')
+
     representation = resolve_checkpoint_representation(checkpoint=checkpoint)
     train_dataset = resolve_train_dataset(checkpoint=checkpoint, override=args.dataset)
     held_out_dataset = resolve_held_out_dataset(train_dataset=train_dataset,
@@ -383,6 +393,7 @@ def main():
             ['git', 'diff', args.train_commit, 'HEAD', '--', 'scripts/models/act_v2',
              'scripts/dataset.py', 'scripts/action_modes.py', 'scripts/utils/analyze_z.py'],
             text=True) if args.train_commit else None,
+        'config_tag': tag,
         'scope': 'evaluation code subset only'})
 
     torch.manual_seed(42)
@@ -408,7 +419,7 @@ def main():
                                       for seed, file in zip(SEEDS, files)}}
     save_json(path=destination / 'results.json', value=results)
     (destination / 'summary.md').write_text(report(
-        results=results, iteration=args.iteration, checkpoint=args.checkpoint.name,
+        results=results, iteration=args.iteration, tag=tag, checkpoint=args.checkpoint.name,
         checkpoint_sha=checkpoint_sha, train_commit=args.train_commit,
         action_mode=representation['mode'], has_held_out='held-out-candidate' in splits))
     print('COMPLETE test 1', flush=True)
