@@ -166,7 +166,9 @@ def unavailable_offer_rejection(*, status: int, response: dict, offer_id: int | 
     The official create-instance spec describes 404/3603 as "Offer not found or
     not available", with success=false and error=invalid_args. The observed
     HTTP 400 wrapper is accepted only with that exact nested rejection, not as
-    a generic HTTP-error retry rule.
+    a generic HTTP-error retry rule. Also accept the observed two-space separator
+    after no_such_ask: offline reconstruction matched the 142-byte response hash
+    in iteration 20261013T125627Z-d77828791c1b. No other whitespace is normalized.
     https://github.com/vast-ai/docs/blob/main/api-reference/openapi/yaml/create_instance.yaml
     """
     if (type(status) is not int or status != 400
@@ -179,7 +181,9 @@ def unavailable_offer_rejection(*, status: int, response: dict, offer_id: int | 
         return False
     # Exact text, not just numeric diagnostics; no contract/instance fields,
     # trailing text, alternate shapes or mismatched ask identities are accepted.
-    if response["msg"] != f"error 404/3603: no_such_ask Instance type by id {offer_id} is not available.":
+    documented_message = f"error 404/3603: no_such_ask Instance type by id {offer_id} is not available."
+    observed_message = f"error 404/3603: no_such_ask  Instance type by id {offer_id} is not available."
+    if response["msg"] not in (documented_message, observed_message):
         return False
     return ("ask_id" not in response
             or type(response["ask_id"]) is int and response["ask_id"] == offer_id)

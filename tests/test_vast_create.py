@@ -156,9 +156,48 @@ class ResponseTests(unittest.TestCase):
                 self.assertNotIn("no_such_ask", json.dumps(result))
                 opener.open.assert_called_once()
 
+    def test_observed_two_space_unavailable_offer_http_error(self) -> None:
+        # Synthetic identities, with the live response's compact field order and
+        # two-space separator. Never retain the original provider message.
+        body = json.dumps({"success": False, "error": "invalid_args",
+                           "msg": "error 404/3603: no_such_ask  Instance type by id 42 is not available.",
+                           "ask_id": 42}, separators=(",", ":")).encode()
+        opener = Mock()
+        opener.open.side_effect = HTTPError("https://example.invalid/", 400, "error", {}, io.BytesIO(body))
+        with patch.dict(os.environ, {"VAST_API_KEY": "test-secret-key"}), \
+                patch.object(create_request, "build_opener", return_value=opener):
+            result = create_request.send_create(offer_id=42, label=LABEL)
+        self.assertEqual(result["outcome"], "rejected")
+        self.assertEqual(result["reason"], "unavailable_offer_rejection")
+        self.assertEqual(result["response_bytes"], 130)
+        self.assertEqual(result["provider_error_http_code"], 404)
+        self.assertEqual(result["provider_error_id"], 3603)
+        self.assertNotIn("msg", result)
+        self.assertNotIn("no_such_ask", json.dumps(result))
+        opener.open.assert_called_once()
+
+    def test_unavailable_offer_reconstruction_matches_saved_receipt(self) -> None:
+        # Public offer identity and a documented error template, not a raw
+        # provider response. Bind the regression to the saved allowlisted hash.
+        offer_id = 42741679
+        body = json.dumps({"success": False, "error": "invalid_args",
+                           "msg": f"error 404/3603: no_such_ask  Instance type by id {offer_id} is not available.",
+                           "ask_id": offer_id}, separators=(",", ":")).encode()
+        result = create_request.classify_response(status=400, body=body, offer_id=offer_id)
+        self.assertEqual(result["response_bytes"], 142)
+        self.assertEqual(result["response_sha256"],
+                         "adc7e73ae9a2f3959cc43d5b66f012a82ef3911eb56ae834da754682d6b94501")
+        self.assertEqual(result["outcome"], "rejected")
+        self.assertEqual(result["reason"], "unavailable_offer_rejection")
+
     def test_unavailable_offer_rejection_requires_validated_exact_response(self) -> None:
+        for separator in (" ", "  "):
+            with self.subTest(separator=separator):
+                self.check_unavailable_offer_response(separator=separator)
+
+    def check_unavailable_offer_response(self, *, separator: str) -> None:
         baseline = {"success": False, "error": "invalid_args",
-                    "msg": "error 404/3603: no_such_ask Instance type by id 42 is not available."}
+                    "msg": f"error 404/3603: no_such_ask{separator}Instance type by id 42 is not available."}
         for extra in ({}, {"ask_id": 42}):
             result = create_request.classify_response(status=400, body=json.dumps({**baseline, **extra}).encode(), offer_id=42)
             self.assertEqual(result["outcome"], "rejected")
@@ -167,13 +206,17 @@ class ResponseTests(unittest.TestCase):
             "error": ("offer_unavailable", "no_such_ask", None),
             "msg": (baseline["msg"] + " secret", baseline["msg"].replace("42", "43"),
                     baseline["msg"].replace("no_such_ask", "other"),
-                    baseline["msg"].replace("404/3603", "400/3467"), None),
+                    baseline["msg"].replace("404/3603", "400/3467"),
+                    baseline["msg"].replace(f"no_such_ask{separator}", "no_such_ask   "),
+                    baseline["msg"].replace(f"no_such_ask{separator}", "no_such_ask\t"),
+                    baseline["msg"].replace(f"no_such_ask{separator}", "no_such_ask\n"),
+                    " " + baseline["msg"], baseline["msg"] + " ", None),
         }
         bodies = [json.dumps({key: value for key, value in baseline.items() if key != field}).encode()
                   for field in baseline]
         bodies.extend(json.dumps({**baseline, field: value}).encode()
                       for field, values in alternatives.items() for value in values)
-        for field in ("new_contract", "instance_id", "instance", "id", "unexpected"):
+        for field in ("new_contract", "instance_id", "instance", "id", "contract_id", "contract", "unexpected"):
             bodies.extend(json.dumps({**baseline, field: value}).encode()
                           for value in (123, None, 0, False, "123", {}))
         bodies.extend(json.dumps({**baseline, "ask_id": value}).encode()
@@ -354,7 +397,8 @@ class ReceiptTests(unittest.TestCase):
 
     def test_unavailable_rejection_replays_without_resending_and_searches_fresh(self) -> None:
         body = json.dumps({"success": False, "error": "invalid_args",
-                           "msg": "error 404/3603: no_such_ask Instance type by id 42 is not available."}).encode()
+                           "msg": "error 404/3603: no_such_ask  Instance type by id 42 is not available.",
+                           "ask_id": 42}, separators=(",", ":")).encode()
         receipt = {"version": 1, "label": LABEL, "offer_id": 42,
                    **create_request.classify_response(status=400, body=body, offer_id=42)}
         common.write_json(path=self.path, value=receipt)
@@ -481,9 +525,15 @@ class ReceiptTests(unittest.TestCase):
         self.assertIn("400", str(blocked.exception))
 
     def test_unavailable_offer_hint_blocks_without_mutation_after_receipt_replay(self) -> None:
+        # Even a hash of the now-recognized form cannot upgrade an old unknown
+        # receipt: replay has diagnostics, not a validated raw provider response.
+        body = json.dumps({"success": False, "error": "invalid_args",
+                           "msg": "error 404/3603: no_such_ask  Instance type by id 42 is not available.",
+                           "ask_id": 42}, separators=(",", ":")).encode()
         receipt = {"version": 1, "label": LABEL, "offer_id": 42, "outcome": "unknown",
                    "reason": "http_error", "http_status": 400, "provider_error_code": "invalid_args",
-                   "provider_error_http_code": 404, "provider_error_id": 3603}
+                   "provider_error_http_code": 404, "provider_error_id": 3603,
+                   "response_bytes": len(body), "response_sha256": hashlib.sha256(body).hexdigest()}
         common.write_json(path=self.path, value=receipt)
         original_receipt = self.path.read_bytes()
         save = Mock()

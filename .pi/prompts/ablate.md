@@ -228,7 +228,11 @@ responses without an instance identity are recorded as rejection.
 The only HTTP-error exception is HTTP 400 with a validated JSON object containing
 `success: false`, `error: "invalid_args"`, and exactly
 `error 404/3603: no_such_ask Instance type by id <requested-offer-id> is not available.`
-in `msg`. Only those fields and an optional matching integer `ask_id` are allowed;
+in `msg`, accepting either the documented single space or the observed two spaces
+between `no_such_ask` and `Instance`. The two-space form was verified offline
+against the saved 142-byte response SHA-256 from iteration
+`20261013T125627Z-d77828791c1b`; no other whitespace is normalized. Only those
+fields and an optional matching integer `ask_id` are allowed;
 instance/contract fields (even null), duplicate fields, mismatched IDs or extra
 text remain uncertain. Vast's [official create-instance specification](https://github.com/vast-ai/docs/blob/main/api-reference/openapi/yaml/create_instance.yaml)
 describes the nested 404/3603 signature as **Offer not found or not available**;

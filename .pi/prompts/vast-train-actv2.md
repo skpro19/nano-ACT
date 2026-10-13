@@ -139,8 +139,9 @@ never delete datasets with the workload profile.
   retries only read-only exact-label queries for up to 60 seconds; persistent
   absence remains uncertain and duplicate labels block immediately. The sole
   HTTP-error exception is a validated HTTP 400 `invalid_args` response with
-  `success: false`, the exact documented nested 404/3603 `no_such_ask` message
-  naming the requested offer, no instance identity or extra fields, and an
+  `success: false`, the exact nested 404/3603 `no_such_ask` message naming the
+  requested offer (documented single-space or hash-verified two-space separator
+  after `no_such_ask` only), no instance identity or extra fields, and an
   optional matching integer `ask_id`. It is recorded as unavailable-offer
   rejection; only successful exact-label absence permits a fresh search under
   unchanged safeguards and the three-attempt cap. Historical unknown receipts
