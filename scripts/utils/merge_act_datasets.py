@@ -27,6 +27,9 @@ from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# ``data`` attributes that define how a copied ``actions`` array must be interpreted.
+ACTION_METADATA_KEYS = ("source_env_args", "supported_action_modes")
+
 
 def sorted_demo_names(*, dataset: h5py.File) -> list[str]:
     demos = list(dataset["data"].keys())
@@ -35,6 +38,25 @@ def sorted_demo_names(*, dataset: h5py.File) -> list[str]:
 
 def demo_attr_keys(*, demo: h5py.Group) -> list[str]:
     return sorted(demo.attrs.keys())
+
+
+def assert_compatible_action_metadata(*, files: list[h5py.File]) -> str:
+    """Return the datasets' shared ``env_args``, or raise if they cannot be combined.
+
+    Demonstrations may only be mixed when the files agree on the environment and the
+    action semantics; otherwise a copied ``actions`` array would be interpreted with the
+    wrong controller configuration. Returns the shared ``env_args`` for the caller.
+    """
+    env_args_values = [file["data"].attrs["env_args"] for file in files]
+    if len(set(env_args_values)) != 1:
+        raise ValueError("datasets have different env_args and cannot be merged")
+
+    for key in ACTION_METADATA_KEYS:
+        values = [file["data"].attrs.get(key) for file in files]
+        if len(set(values)) != 1:
+            raise ValueError(f"datasets have different {key}; cannot merge action semantics")
+
+    return env_args_values[0]
 
 
 def copy_demo(
@@ -71,18 +93,7 @@ def merge_datasets(*, first_path: Path, second_path: Path, output_path: Path) ->
 
     total_samples = 0
     with h5py.File(first_path, "r") as first_file, h5py.File(second_path, "r") as second_file:
-        env_args_first = first_file["data"].attrs["env_args"]
-        env_args_second = second_file["data"].attrs["env_args"]
-        if env_args_first != env_args_second:
-            raise ValueError(
-                "datasets have different env_args and cannot be merged:\n"
-                f"  first:  {env_args_first}\n"
-                f"  second: {env_args_second}"
-            )
-
-        for key in ("source_env_args", "supported_action_modes"):
-            if first_file["data"].attrs.get(key) != second_file["data"].attrs.get(key):
-                raise ValueError(f"datasets have different {key}; cannot merge action semantics")
+        env_args_first = assert_compatible_action_metadata(files=[first_file, second_file])
 
         first_demos = sorted_demo_names(dataset=first_file)
         second_demos = sorted_demo_names(dataset=second_file)
@@ -107,7 +118,7 @@ def merge_datasets(*, first_path: Path, second_path: Path, output_path: Path) ->
 
             data_group.attrs["total"] = total_samples
             data_group.attrs["env_args"] = env_args_first
-            for key in ("source_env_args", "supported_action_modes"):
+            for key in ACTION_METADATA_KEYS:
                 if key in first_file["data"].attrs:
                     data_group.attrs[key] = first_file["data"].attrs[key]
 
