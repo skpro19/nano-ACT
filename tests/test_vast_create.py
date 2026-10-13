@@ -115,6 +115,52 @@ class ResponseTests(unittest.TestCase):
         self.assertEqual(result["provider_error_fields"], ["id"])
         opener.open.assert_called_once()
 
+    def test_documented_unavailable_offer_http_errors_remain_unknown(self) -> None:
+        body = json.dumps({"success": False, "error": "invalid_args",
+                           "msg": "error 404/3603: no_such_ask Instance type by id 42 is not available."}).encode()
+        for status in (400, 404):
+            with self.subTest(status=status):
+                opener = Mock()
+                opener.open.side_effect = HTTPError("https://example.invalid/", status, "error", {},
+                                                    io.BytesIO(body))
+                with patch.dict(os.environ, {"VAST_API_KEY": "test-secret-key"}), \
+                        patch.object(create_request, "build_opener", return_value=opener):
+                    result = create_request.send_create(offer_id=42, label=LABEL)
+                self.assertEqual(result["outcome"], "unknown")
+                self.assertEqual(result["reason"], "http_error")
+                self.assertEqual(result["http_status"], status)
+                self.assertEqual(result["provider_error_code"], "invalid_args")
+                self.assertEqual(result["provider_error_http_code"], 404)
+                self.assertEqual(result["provider_error_id"], 3603)
+                self.assertNotIn("msg", result)
+                self.assertNotIn("no_such_ask", json.dumps(result))
+                opener.open.assert_called_once()
+
+    def test_unavailable_offer_hint_requires_exact_safe_diagnostics(self) -> None:
+        baseline = {"http_status": 400, "provider_error_code": "invalid_args",
+                    "provider_error_http_code": 404, "provider_error_id": 3603}
+        original = deepcopy(baseline)
+        hint = create_request.diagnostic_hint(result=baseline)
+        self.assertIn("unavailable offer", hint)
+        self.assertIn("does not establish that no rental was created", hint)
+        self.assertEqual(baseline, original)
+        alternatives = {
+            "http_status": (404, 200, "400", 400.0, True, None),
+            "provider_error_code": ("offer_unavailable", "secret", 400, None),
+            "provider_error_http_code": (400, "404", 404.0, True, None),
+            "provider_error_id": (3467, "3603", 3603.0, True, None),
+        }
+        for field, values in alternatives.items():
+            missing = {key: value for key, value in baseline.items() if key != field}
+            with self.subTest(missing=field):
+                self.assertIsNone(create_request.diagnostic_hint(result=missing))
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    self.assertIsNone(create_request.diagnostic_hint(result={**baseline, field: value}))
+        for malformed in (None, [], "secret", {}):
+            with self.subTest(malformed=malformed):
+                self.assertIsNone(create_request.diagnostic_hint(result=malformed))
+
     def test_transport_errors_do_not_retry_or_leak_exception(self) -> None:
         for error in (URLError("secret-provider-token"), TimeoutError("secret-provider-token"),
                       HTTPError("https://example.invalid/?api_key=secret-provider-token", 400,
@@ -300,6 +346,44 @@ class ReceiptTests(unittest.TestCase):
                 provision.reconcile_create(journal=self.journal, attempt=self.attempt, save=Mock())
         self.assertIn("3467", str(blocked.exception))
         self.assertIn("400", str(blocked.exception))
+
+    def test_unavailable_offer_hint_blocks_without_mutation_after_receipt_replay(self) -> None:
+        receipt = {"version": 1, "label": LABEL, "offer_id": 42, "outcome": "unknown",
+                   "reason": "http_error", "http_status": 400, "provider_error_code": "invalid_args",
+                   "provider_error_http_code": 404, "provider_error_id": 3603}
+        common.write_json(path=self.path, value=receipt)
+        original_receipt = self.path.read_bytes()
+        save = Mock()
+        provision.restore_create_result(journal=self.journal, attempt=self.attempt,
+                                        directory=self.directory, save=save)
+        self.assertEqual(self.attempt["create_result"], receipt)
+        self.assertNotIn("create_rejected", self.attempt)
+        self.assertNotIn("returned_instance_id", self.attempt)
+        save.assert_called_once()
+        save.reset_mock()
+        original_attempt = deepcopy(self.attempt)
+        with patch.object(self.journal, "event") as event:
+            provision.restore_create_result(journal=self.journal, attempt=self.attempt,
+                                            directory=self.directory, save=save)
+            event.assert_not_called()
+        with patch.object(provision, "instances", return_value=[]) as query, \
+                patch.object(self.journal, "run") as mutation, \
+                patch.object(create_request, "send_create") as send:
+            with self.assertRaises(common.Blocked) as blocked:
+                provision.reconcile_create(journal=self.journal, attempt=self.attempt, save=save)
+        message = str(blocked.exception)
+        self.assertIn("saved offer ID 42", message)
+        self.assertIn("unavailable offer", message)
+        self.assertIn("does not establish that no rental was created", message)
+        self.assertIn("Create outcome unknown", message)
+        self.assertIn("do not issue another create", message)
+        self.assertIn(str(self.path), message)
+        query.assert_called_once()
+        save.assert_not_called()
+        mutation.assert_not_called()
+        send.assert_not_called()
+        self.assertEqual(self.attempt, original_attempt)
+        self.assertEqual(self.path.read_bytes(), original_receipt)
 
     def test_valid_snapshot_replays_and_receipt_is_unchanged(self) -> None:
         snapshot = create_request.request_snapshot(offer_id=42, label=LABEL,

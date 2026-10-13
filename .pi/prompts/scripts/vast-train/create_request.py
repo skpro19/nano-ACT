@@ -116,6 +116,21 @@ def safe_diagnostics(result: dict) -> dict:
     return safe
 
 
+def diagnostic_hint(*, result: dict) -> str | None:
+    """Explain only the known unavailable-offer signature, without inferring outcome."""
+    diagnostics = safe_diagnostics(result)
+    # Vast documents "error 404/3603: no_such_ask Instance type by id ... is not available."
+    # https://github.com/vast-ai/docs/blob/main/api-reference/openapi/yaml/create_instance.yaml
+    # https://docs.vast.ai/api-reference/instances/create-instance
+    if (diagnostics.get("http_status") == 400
+            and diagnostics.get("provider_error_code") == "invalid_args"
+            and diagnostics.get("provider_error_http_code") == 404
+            and diagnostics.get("provider_error_id") == 3603):
+        return ("Vast's documented no_such_ask diagnostic indicates an unavailable offer; "
+                "this does not establish that no rental was created")
+    return None
+
+
 def message_diagnostics(message: object) -> dict:
     """Recognize only the documented numeric prefix and quoted envelope names."""
     if type(message) is not str:

@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 import uuid
 
-from create_request import request_snapshot, safe_diagnostics, unique_fields
+from create_request import diagnostic_hint, request_snapshot, safe_diagnostics, unique_fields
 from hardware_gate import cpu_rank, evaluate
 from ssh_endpoint import select_endpoint
 from workflow_common import (
@@ -199,6 +199,9 @@ def reconcile_create(*, journal: Journal, attempt: dict, save: Callable[[], None
             result = attempt.get("create_result", {})
             path = receipt_path or journal.directory / f"create-{attempt['label']}.json"
             detail = f"diagnostics={json.dumps(safe_diagnostics(result), sort_keys=True)}; receipt={path}"
+            hint = diagnostic_hint(result=result)
+            if hint is not None:
+                detail += f"; saved offer ID {attempt['offer']['id']}: {hint}"
             raise Blocked(f"Create outcome unknown for {attempt['label']} ({detail}); "
                           "do not issue another create. Resume only reconciles this label; "
                           "persistent absence requires provider-confirmed rejection, not state editing")
