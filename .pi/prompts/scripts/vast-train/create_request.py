@@ -38,7 +38,7 @@ SAFE_REASONS = {
     "invalid_json", "invalid_response_shape", "http_error", "confirmed_creation",
     "explicit_rejection", "unrecognized_response", "missing_credentials",
     "transport_error", "response_too_large", "response_read_error",
-    "local_validation_failed",
+    "local_validation_failed", "unavailable_offer_rejection",
 }
 
 
@@ -160,7 +160,32 @@ def unique_fields(pairs: list[tuple[str, object]]) -> dict:
     return fields
 
 
-def classify_response(*, status: int, body: bytes) -> dict:
+def unavailable_offer_rejection(*, status: int, response: dict, offer_id: int | None) -> bool:
+    """Accept only Vast's documented no_such_ask envelope for this requested ask.
+
+    The official create-instance spec describes 404/3603 as "Offer not found or
+    not available", with success=false and error=invalid_args. The observed
+    HTTP 400 wrapper is accepted only with that exact nested rejection, not as
+    a generic HTTP-error retry rule.
+    https://github.com/vast-ai/docs/blob/main/api-reference/openapi/yaml/create_instance.yaml
+    """
+    if (type(status) is not int or status != 400
+            or type(offer_id) is not int or offer_id <= 0
+            or not {"success", "error", "msg"} <= response.keys()
+            or not response.keys() <= {"success", "error", "msg", "ask_id"}
+            or response["success"] is not False
+            or response["error"] != "invalid_args"
+            or type(response["msg"]) is not str):
+        return False
+    # Exact text, not just numeric diagnostics; no contract/instance fields,
+    # trailing text, alternate shapes or mismatched ask identities are accepted.
+    if response["msg"] != f"error 404/3603: no_such_ask Instance type by id {offer_id} is not available.":
+        return False
+    return ("ask_id" not in response
+            or type(response["ask_id"]) is int and response["ask_id"] == offer_id)
+
+
+def classify_response(*, status: int, body: bytes, offer_id: int | None = None) -> dict:
     result = {"http_status": status, "response_bytes": len(body),
               "response_sha256": hashlib.sha256(body).hexdigest(),
               "outcome": "unknown", "reason": "invalid_json"}
@@ -178,11 +203,17 @@ def classify_response(*, status: int, body: bytes) -> dict:
         result["provider_error_code"] = code
     result.update(message_diagnostics(response.get("msg")))
     identity = response.get("new_contract")
-    if not 200 <= status < 300:
+    if unavailable_offer_rejection(status=status, response=response, offer_id=offer_id):
+        result.update(outcome="rejected", reason="unavailable_offer_rejection")
+    elif not 200 <= status < 300:
         result["reason"] = "http_error"
     elif response.get("success") is True and type(identity) is int and identity > 0:
         result.update(outcome="created", reason="confirmed_creation", instance_id=identity)
-    elif response.get("success") is False and (identity is None or type(identity) is int and identity == 0):
+    elif (response.get("success") is False
+            and (identity is None or type(identity) is int and identity == 0)
+            # Alternate identity fields can contradict rejection even when the
+            # canonical new_contract field is absent or empty. Fail closed.
+            and not {"instance_id", "instance", "id", "contract_id", "contract"} & response.keys()):
         result.update(outcome="rejected", reason="explicit_rejection")
     else:
         result["reason"] = "unrecognized_response"
@@ -218,7 +249,7 @@ def send_create(*, offer_id: int, label: str) -> dict:
             body = response.read(MAX_RESPONSE_BYTES + 1)
             if len(body) > MAX_RESPONSE_BYTES:
                 return {**diagnostics, "outcome": "unknown", "reason": "response_too_large", "http_status": response.code}
-            return {**diagnostics, **classify_response(status=response.code, body=body)}
+            return {**diagnostics, **classify_response(status=response.code, body=body, offer_id=offer_id)}
     except (OSError, ValueError, HTTPException):
         return {**diagnostics, "outcome": "unknown", "reason": "response_read_error"}
 

@@ -137,7 +137,15 @@ never delete datasets with the workload profile.
   They retain HTTP status, classification and safe reasons, not raw sensitive
   responses. CLI exit 0 is not proof of creation. Resume replays receipts and
   retries only read-only exact-label queries for up to 60 seconds; persistent
-  absence remains uncertain and duplicate labels block immediately.
+  absence remains uncertain and duplicate labels block immediately. The sole
+  HTTP-error exception is a validated HTTP 400 `invalid_args` response with
+  `success: false`, the exact documented nested 404/3603 `no_such_ask` message
+  naming the requested offer, no instance identity or extra fields, and an
+  optional matching integer `ask_id`. It is recorded as unavailable-offer
+  rejection; only successful exact-label absence permits a fresh search under
+  unchanged safeguards and the three-attempt cap. Historical unknown receipts
+  are never upgraded from numeric diagnostics alone. See `ablate.md` for the
+  exact signature and official documentation.
 - Explicit resume attempts recovery; it cannot guarantee resolution of a lost
   create response. If Vast confirms that the exact request created no rental,
   an operator may use `resolve_create.py` with reviewed request-specific evidence

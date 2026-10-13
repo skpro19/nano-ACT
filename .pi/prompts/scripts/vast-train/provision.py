@@ -172,7 +172,9 @@ def restore_create_result(*, journal: Journal, attempt: dict, directory: Path,
             raise Blocked("Create receipt conflicts with saved instance identity")
         result["instance_id"] = identity
     elif result["outcome"] == "rejected":
-        if attempt.get("returned_instance_id") or attempt.get("instance_id"):
+        if "instance_id" in receipt or "new_contract" in receipt:
+            raise Blocked("Rejection receipt contains an instance identity")
+        if attempt.get("returned_instance_id") is not None or attempt.get("instance_id") is not None:
             raise Blocked("Rejection receipt conflicts with a saved instance identity")
     if attempt.get("create_result") == result:
         return
@@ -281,6 +283,7 @@ def provision(*, journal: Journal, combo: dict, directory: Path,
                 save()
                 journal.event(kind="create_explicitly_rejected", combo=combo["id"], label=active["label"])
                 continue
+            raise Blocked("Rejection receipt conflicts with an exact-label instance; no replacement rented")
         if active.get("rejected"):
             # Destruction may have succeeded just before the state write was
             # interrupted. A valid API absence can finish this provisional step.

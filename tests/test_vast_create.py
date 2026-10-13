@@ -28,8 +28,28 @@ class ResponseTests(unittest.TestCase):
         created = create_request.classify_response(status=200, body=b'{"success":true,"new_contract":123}')
         self.assertEqual(created["outcome"], "created")
         self.assertEqual(created["instance_id"], 123)
-        rejected = create_request.classify_response(status=200, body=b'{"success":false}')
-        self.assertEqual(rejected["outcome"], "rejected")
+        for fields in ({}, {"new_contract": None}, {"new_contract": 0},
+                       {"error": "offer_unavailable"}):
+            with self.subTest(fields=fields):
+                body = json.dumps({"success": False, **fields}).encode()
+                rejected = create_request.classify_response(status=200, body=body)
+                self.assertEqual(rejected["outcome"], "rejected")
+                self.assertEqual(rejected["reason"], "explicit_rejection")
+
+    def test_successful_http_rejection_with_alternate_identity_is_unknown(self) -> None:
+        alternate_identities = ({"instance_id": 123}, {"instance": {"id": 123}},
+                                {"id": 123}, {"contract_id": 123}, {"contract": {"id": 123}},
+                                {"instance_id": None}, {"instance_id": 0}, {"instance": {}})
+        for canonical_identity in ({}, {"new_contract": None}, {"new_contract": 0}):
+            for alternate_identity in alternate_identities:
+                with self.subTest(canonical=canonical_identity, alternate=alternate_identity):
+                    body = json.dumps({"success": False, **canonical_identity,
+                                       **alternate_identity}).encode()
+                    result = create_request.classify_response(status=200, body=body)
+                    self.assertEqual(result["outcome"], "unknown")
+                    self.assertEqual(result["reason"], "unrecognized_response")
+                    self.assertNotIn("instance_id", result)
+                    self.assertNotIn("instance", result)
 
     def test_ambiguous_responses_never_authorize_replacement(self) -> None:
         bodies = (b'Failed with error 400: unavailable', b'null', b'[]', b'{}',
@@ -115,7 +135,7 @@ class ResponseTests(unittest.TestCase):
         self.assertEqual(result["provider_error_fields"], ["id"])
         opener.open.assert_called_once()
 
-    def test_documented_unavailable_offer_http_errors_remain_unknown(self) -> None:
+    def test_only_documented_unavailable_offer_http_400_is_rejected(self) -> None:
         body = json.dumps({"success": False, "error": "invalid_args",
                            "msg": "error 404/3603: no_such_ask Instance type by id 42 is not available."}).encode()
         for status in (400, 404):
@@ -126,8 +146,8 @@ class ResponseTests(unittest.TestCase):
                 with patch.dict(os.environ, {"VAST_API_KEY": "test-secret-key"}), \
                         patch.object(create_request, "build_opener", return_value=opener):
                     result = create_request.send_create(offer_id=42, label=LABEL)
-                self.assertEqual(result["outcome"], "unknown")
-                self.assertEqual(result["reason"], "http_error")
+                self.assertEqual(result["outcome"], "rejected" if status == 400 else "unknown")
+                self.assertEqual(result["reason"], "unavailable_offer_rejection" if status == 400 else "http_error")
                 self.assertEqual(result["http_status"], status)
                 self.assertEqual(result["provider_error_code"], "invalid_args")
                 self.assertEqual(result["provider_error_http_code"], 404)
@@ -135,6 +155,41 @@ class ResponseTests(unittest.TestCase):
                 self.assertNotIn("msg", result)
                 self.assertNotIn("no_such_ask", json.dumps(result))
                 opener.open.assert_called_once()
+
+    def test_unavailable_offer_rejection_requires_validated_exact_response(self) -> None:
+        baseline = {"success": False, "error": "invalid_args",
+                    "msg": "error 404/3603: no_such_ask Instance type by id 42 is not available."}
+        for extra in ({}, {"ask_id": 42}):
+            result = create_request.classify_response(status=400, body=json.dumps({**baseline, **extra}).encode(), offer_id=42)
+            self.assertEqual(result["outcome"], "rejected")
+        alternatives = {
+            "success": (True, None, 0, "false"),
+            "error": ("offer_unavailable", "no_such_ask", None),
+            "msg": (baseline["msg"] + " secret", baseline["msg"].replace("42", "43"),
+                    baseline["msg"].replace("no_such_ask", "other"),
+                    baseline["msg"].replace("404/3603", "400/3467"), None),
+        }
+        bodies = [json.dumps({key: value for key, value in baseline.items() if key != field}).encode()
+                  for field in baseline]
+        bodies.extend(json.dumps({**baseline, field: value}).encode()
+                      for field, values in alternatives.items() for value in values)
+        for field in ("new_contract", "instance_id", "instance", "id", "unexpected"):
+            bodies.extend(json.dumps({**baseline, field: value}).encode()
+                          for value in (123, None, 0, False, "123", {}))
+        bodies.extend(json.dumps({**baseline, "ask_id": value}).encode()
+                      for value in (43, None, True, 42.0, "42"))
+        bodies.extend((json.dumps(baseline).encode()[:-1] + b',"success":false}',
+                       json.dumps(baseline).encode() + b' trailing', b'[]', b'null', b'\xff'))
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertEqual(create_request.classify_response(status=400, body=body, offer_id=42)["outcome"], "unknown")
+        for offer_id in (None, True, 42.0, "42", 43):
+            with self.subTest(offer_id=offer_id):
+                self.assertEqual(create_request.classify_response(status=400, body=json.dumps(baseline).encode(),
+                                                                  offer_id=offer_id)["outcome"], "unknown")
+        for status in (302, 404, 408, 429, 500, 503):
+            self.assertEqual(create_request.classify_response(status=status, body=json.dumps(baseline).encode(),
+                                                              offer_id=42)["outcome"], "unknown")
 
     def test_unavailable_offer_hint_requires_exact_safe_diagnostics(self) -> None:
         baseline = {"http_status": 400, "provider_error_code": "invalid_args",
@@ -296,6 +351,84 @@ class ReceiptTests(unittest.TestCase):
         self.assertNotIn("request_snapshot", self.attempt["create_result"])
         self.assertTrue(self.attempt["create_rejected"])
         save.assert_called_once()
+
+    def test_unavailable_rejection_replays_without_resending_and_searches_fresh(self) -> None:
+        body = json.dumps({"success": False, "error": "invalid_args",
+                           "msg": "error 404/3603: no_such_ask Instance type by id 42 is not available."}).encode()
+        receipt = {"version": 1, "label": LABEL, "offer_id": 42,
+                   **create_request.classify_response(status=400, body=body, offer_id=42)}
+        common.write_json(path=self.path, value=receipt)
+        original = self.path.read_bytes()
+        self.attempt["offer"]["machine_id"] = 100
+        combo = {"id": "0001", "attempts": [self.attempt]}
+        with patch.object(provision, "instances", return_value=[]) as query, \
+                patch.object(provision, "search_offers", side_effect=common.Blocked("fresh search stopped")) as search, \
+                patch.object(self.journal, "run") as mutation:
+            with self.assertRaisesRegex(common.Blocked, "fresh search stopped"):
+                provision.provision(journal=self.journal, combo=combo, directory=self.directory, commit="pinned", save=Mock())
+        self.assertTrue(self.attempt["create_rejected"])
+        self.assertEqual(self.attempt["status"], "removed")
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(search.call_args.kwargs["excluded"], {100})
+        query.assert_called_once()
+        mutation.assert_not_called()
+
+    def test_three_unavailable_offers_keep_attempt_cap_and_fresh_search(self) -> None:
+        combo = {"id": "0001"}
+        offers = [{"id": 42 + index, "machine_id": 100 + index} for index in range(3)]
+
+        def create_receipt(*, args: list, **kwargs) -> SimpleNamespace:
+            offer_id = int(args[args.index("--offer-id") + 1])
+            label = args[args.index("--label") + 1]
+            path = Path(args[args.index("--result") + 1])
+            body = json.dumps({"success": False, "error": "invalid_args",
+                               "msg": f"error 404/3603: no_such_ask Instance type by id {offer_id} is not available."}).encode()
+            common.write_json(path=path, value={"version": 1, "label": label, "offer_id": offer_id,
+                                               **create_request.classify_response(status=400, body=body, offer_id=offer_id)})
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(provision, "instances", return_value=[]), \
+                patch.object(provision, "search_offers", side_effect=[[offer] for offer in offers]) as search, \
+                patch.object(provision, "git_preflight") as preflight, \
+                patch.object(self.journal, "run", side_effect=create_receipt) as mutation:
+            with self.assertRaisesRegex(common.Blocked, "All three provisioning attempts failed"):
+                provision.provision(journal=self.journal, combo=combo, directory=self.directory, commit="pinned", save=Mock())
+        self.assertEqual(mutation.call_count, 3)
+        self.assertEqual(preflight.call_count, 3)
+        self.assertEqual(search.call_count, 3)
+        self.assertEqual([call.kwargs["excluded"] for call in search.call_args_list], [set(), {100}, {100, 101}])
+        self.assertEqual([attempt["status"] for attempt in combo["attempts"]], ["removed"] * 3)
+        self.assertEqual(len({attempt["label"] for attempt in combo["attempts"]}), 3)
+
+    def test_rejection_never_overrides_identity_or_exact_label_conflicts(self) -> None:
+        receipt = {"version": 1, "label": LABEL, "offer_id": 42, "outcome": "rejected",
+                   "reason": "unavailable_offer_rejection"}
+        for field in ("instance_id", "new_contract"):
+            common.write_json(path=self.path, value={**receipt, field: 123})
+            with self.assertRaises(common.Blocked):
+                provision.restore_create_result(journal=self.journal, attempt=self.attempt, directory=self.directory, save=Mock())
+        common.write_json(path=self.path, value=receipt)
+        for field in ("instance_id", "returned_instance_id"):
+            attempt = {**self.attempt, field: 123}
+            with self.assertRaises(common.Blocked):
+                provision.restore_create_result(journal=self.journal, attempt=attempt, directory=self.directory, save=Mock())
+        for records in ([{"id": 123, "label": LABEL}], [{"id": 123, "label": LABEL}, {"id": 124, "label": LABEL}]):
+            with patch.object(provision, "instances", return_value=records), \
+                    patch.object(provision, "search_offers") as search, patch.object(self.journal, "run") as mutation:
+                with self.assertRaises(common.Blocked):
+                    provision.provision(journal=self.journal, combo={"id": "0001", "attempts": [self.attempt]},
+                                        directory=self.directory, commit="pinned", save=Mock())
+                search.assert_not_called()
+                mutation.assert_not_called()
+        self.assertEqual(self.attempt["status"], "create_requested")
+        with patch.object(provision, "instances", side_effect=common.Blocked("invalid instance query")), \
+                patch.object(provision, "search_offers") as search, patch.object(self.journal, "run") as mutation:
+            with self.assertRaisesRegex(common.Blocked, "invalid instance query"):
+                provision.provision(journal=self.journal, combo={"id": "0001", "attempts": [self.attempt]},
+                                    directory=self.directory, commit="pinned", save=Mock())
+            search.assert_not_called()
+            mutation.assert_not_called()
+        self.assertEqual(self.attempt["status"], "create_requested")
 
     def test_known_id_replays_but_conflicting_receipt_blocks(self) -> None:
         common.write_json(path=self.path, value={"version": 1, "label": LABEL, "offer_id": 42,

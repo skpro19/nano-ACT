@@ -221,8 +221,23 @@ printing its result, the adapter atomically records an allowlisted receipt at
 result classification, reason, and response size/hash. Raw responses, headers,
 credentials and free-form provider messages are not persisted. HTTP errors,
 transport errors, malformed/contradictory responses and missing receipts remain
-uncertain; they never authorize replacement creates. Explicit successful-HTTP
-`success: false` responses without an instance identity are recorded as rejection.
+uncertain; they never authorize replacement creates, except for the narrow
+unavailable-offer rejection below. Explicit successful-HTTP `success: false`
+responses without an instance identity are recorded as rejection.
+
+The only HTTP-error exception is HTTP 400 with a validated JSON object containing
+`success: false`, `error: "invalid_args"`, and exactly
+`error 404/3603: no_such_ask Instance type by id <requested-offer-id> is not available.`
+in `msg`. Only those fields and an optional matching integer `ask_id` are allowed;
+instance/contract fields (even null), duplicate fields, mismatched IDs or extra
+text remain uncertain. Vast's [official create-instance specification](https://github.com/vast-ai/docs/blob/main/api-reference/openapi/yaml/create_instance.yaml)
+describes the nested 404/3603 signature as **Offer not found or not available**;
+the observed HTTP 400 wrapper alone is not evidence of rejection. This validated
+response is saved as `unavailable_offer_rejection`. After a successful exact-label
+absence check, provisioning may search afresh with unchanged filters and price
+cap, excluding attempted machines and retaining the three-attempt limit. A live
+exact-label match or failed instance query blocks replacement. Historical unknown
+receipts with numeric diagnostics alone are not upgraded to rejection.
 
 Resume replays a saved receipt without resending the request. Exact-label
 visibility is checked for up to 60 seconds with read-only queries; multiple
