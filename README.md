@@ -1,8 +1,61 @@
 # toy-act
 
+A minimal implementation of Action Chunking with Transformers (ACT) for the robosuite PickPlaceCan task, using robomimic demonstrations. Includes CVAE-based policy training, multi-camera inputs, and rollout evaluation.
+
 <p align="center">
   <img src="assets/rollout/bs64_two_camera_rollout.gif" alt="Two-camera ACT policy rollout on the Can task">
 </p>
+
+## Quick start
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/). Run commands from the repository root.
+
+```bash
+uv sync
+```
+
+### Prepare the data
+
+Download the robomimic **Can / proficient-human (ph) / low_dim** dataset using the [robomimic dataset guide](https://robomimic.github.io/docs/datasets/overview.html) and place it at `datasets/can/ph/low_dim_v15.hdf5`. Render the two camera views used by the example training configuration:
+
+```bash
+uv run python -m scripts.extract_act_dataset \
+    --input datasets/can/ph/low_dim_v15.hdf5 \
+    --output datasets/can/ph/act_two_camera.hdf5 \
+    --cameras agentview robot0_eye_in_hand
+```
+
+Rendering requires a working MuJoCo/OpenGL setup.
+
+### Train
+
+```bash
+uv run python -m scripts.train_v2 \
+    --config configs/train/act_v2/BS-32/BASE.toml \
+    --dataset datasets/can/ph/act_two_camera.hdf5
+```
+
+Training settings live in the TOML configuration. Checkpoints are saved under `checkpoints/act_v2/`, and logs under `runs/act_v2/`.
+
+### Evaluate
+
+Replace `<checkpoint.pt>` with a checkpoint saved during training:
+
+```bash
+uv run python -m scripts.rollout \
+    --checkpoint <checkpoint.pt> \
+    --dataset datasets/can/ph/low_dim_v15.hdf5 \
+    --n-rollouts 20
+```
+
+Evaluation opens a live viewer by default. Add `--no-on-screen` for headless evaluation (requires EGL support).
+
+## Code
+
+- `scripts/models/act_v2/` — ACT policy implementation.
+- `scripts/train_v2.py` — training.
+- `scripts/rollout.py` — rollout evaluation.
+- `configs/train/` and `configs/sweep/` — training and ablation configurations.
 
 ## Training curve
 
@@ -25,8 +78,7 @@
 
 ## Ablations
 
-<details>
-<summary>Batch size</summary>
+### Batch size
 
 <img src="assets/eval-curves/batch_size_eval_curves_legend_right.png" alt="Batch-size ablation eval curves">
 
@@ -34,10 +86,7 @@
   <img src="assets/rollout-two-camera/two_camera_rollout_grid.gif" alt="Batch-size ablation rollout comparison">
 </p>
 
-</details>
-
-<details>
-<summary>Number of cameras</summary>
+### Number of cameras
 
 <img src="assets/eval-curves/num_cameras_eval_curves_legend_right.png" alt="Num-cameras ablation eval curves">
 
@@ -45,11 +94,10 @@
   <img src="assets/rollout-camera-ablation/num_cameras_grid.gif" alt="Num-cameras ablation rollout comparison">
 </p>
 
-</details>
-
-<details>
-<summary>Action chunk size</summary>
+### Action chunk size
 
 <img src="assets/eval-curves/action_chunk_size_best_success_by_beta_bs8_legend.png" alt="Best eval success rate for action chunk size across beta">
 
-</details>
+## Acknowledgments
+
+Based on [ACT](https://tonyzhaozh.github.io/aloha/), with demonstrations and simulation provided by [robomimic](https://robomimic.github.io/) and [robosuite](https://robosuite.ai/).
