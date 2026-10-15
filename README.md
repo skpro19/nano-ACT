@@ -50,8 +50,6 @@
 <details>
 <summary>Action chunk size</summary>
 
-<img src="assets/eval-curves/action_chunk_size_best_success_by_beta_bs8.png" alt="Best eval success rate for action chunk size across beta">
-
-Batch size 8; k=10 vs k=100 across beta.
+<img src="assets/eval-curves/action_chunk_size_best_success_by_beta_bs8_legend.png" alt="Best eval success rate for action chunk size across beta">
 
 </details>

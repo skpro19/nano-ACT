@@ -15,7 +15,7 @@ Examples:
     uv run python scripts/utils/plot_action_chunk_size_best_success.py \\
         --runs-dir runs/act_v2 \\
         --batch-size 8 --action-mode osc_pose_delta --dataset-contains train_90 \\
-        --output assets/eval-curves/action_chunk_size_best_success_by_beta_bs8.png
+        --output assets/eval-curves/action_chunk_size_best_success_by_beta_bs8_legend.png
 """
 
 from __future__ import annotations
@@ -163,13 +163,12 @@ def collect_series(
     return series, batch_sizes
 
 
-def compose_title(*, title: str, batch_sizes: set[int]) -> str:
-    base = title or "Best eval success rate vs beta"
+def compose_legend_title(*, batch_sizes: set[int]) -> str:
     if len(batch_sizes) == 1:
-        return f"{base} (batch size {next(iter(batch_sizes))})"
+        return f"action chunk size\n(batch size {next(iter(batch_sizes))})"
     if batch_sizes:
-        return f"{base} (mixed batch sizes)"
-    return base
+        return "action chunk size\n(mixed batch sizes)"
+    return "action chunk size"
 
 
 def plot_series(
@@ -210,8 +209,8 @@ def plot_series(
     axis.set_ylabel("best eval success rate")
     axis.set_ylim(0.0, 1.0)
     axis.grid(alpha=0.25)
-    axis.legend(title="action chunk size")
-    axis.set_title(compose_title(title=title, batch_sizes=batch_sizes))
+    axis.legend(title=compose_legend_title(batch_sizes=batch_sizes))
+    axis.set_title(title or "Best eval success rate vs beta")
 
     figure.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
