@@ -15,7 +15,7 @@ Examples:
     uv run python scripts/utils/plot_action_chunk_size_best_success.py \\
         --runs-dir runs/act_v2 \\
         --batch-size 8 --action-mode osc_pose_delta --dataset-contains train_90 \\
-        --output assets/eval-curves/action_chunk_size_best_success_by_beta.png
+        --output assets/eval-curves/action_chunk_size_best_success_by_beta_bs8.png
 """
 
 from __future__ import annotations
@@ -136,14 +136,15 @@ def config_matches(args: argparse.Namespace, *, config: dict[str, Any]) -> bool:
 
 
 def collect_series(
-    *, runs_dir: Path, args: argparse.Namespace) -> dict[int, dict[float, float]]:
-    """Map action chunk size -> beta -> best success rate."""
+    *, runs_dir: Path, args: argparse.Namespace) -> tuple[dict[int, dict[float, float]], set[int]]:
+    """Map action chunk size -> beta -> best success rate, plus the batch sizes seen."""
     run_dirs = discover_run_dirs(runs_dir=runs_dir)
     if args.run_name is not None:
         wanted = set(args.run_name)
         run_dirs = [run_dir for run_dir in run_dirs if run_dir.name in wanted]
 
     series: dict[int, dict[float, float]] = {}
+    batch_sizes: set[int] = set()
     for run_dir in run_dirs:
         config = read_run_config(run_dir=run_dir)
         if not config_matches(args, config=config):
@@ -151,17 +152,28 @@ def collect_series(
         beta, chunk_size = config.get("beta"), config.get("action_chunk_size")
         if beta is None or chunk_size is None:
             continue
+        if config.get("batch_size") is not None:
+            batch_sizes.add(int(config["batch_size"]))
         best = best_success_rate(run_dir=run_dir, eval_variant=args.eval_variant)
         if best is None:
             print(f"skip {run_dir.name}: no eval success scalars")
             continue
         by_beta = series.setdefault(int(chunk_size), {})
         by_beta[float(beta)] = max(by_beta.get(float(beta), 0.0), best[1])
-    return series
+    return series, batch_sizes
+
+
+def compose_title(*, title: str, batch_sizes: set[int]) -> str:
+    base = title or "Best eval success rate vs beta"
+    if len(batch_sizes) == 1:
+        return f"{base} (batch size {next(iter(batch_sizes))})"
+    if batch_sizes:
+        return f"{base} (mixed batch sizes)"
+    return base
 
 
 def plot_series(
-    *, series: dict[int, dict[float, float]], output: Path, title: str) -> None:
+    *, series: dict[int, dict[float, float]], batch_sizes: set[int], output: Path, title: str) -> None:
     if not series:
         raise SystemExit("no runs with beta and action_chunk_size to plot")
 
@@ -199,8 +211,7 @@ def plot_series(
     axis.set_ylim(0.0, 1.0)
     axis.grid(alpha=0.25)
     axis.legend(title="action chunk size")
-    if title:
-        axis.set_title(title)
+    axis.set_title(compose_title(title=title, batch_sizes=batch_sizes))
 
     figure.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -211,8 +222,8 @@ def plot_series(
 
 def main() -> None:
     args = parse_args()
-    series = collect_series(runs_dir=args.runs_dir.resolve(), args=args)
-    plot_series(series=series, output=args.output, title=args.title)
+    series, batch_sizes = collect_series(runs_dir=args.runs_dir.resolve(), args=args)
+    plot_series(series=series, batch_sizes=batch_sizes, output=args.output, title=args.title)
 
 
 if __name__ == "__main__":
