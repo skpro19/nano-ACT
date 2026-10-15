@@ -46,3 +46,10 @@
 </p>
 
 </details>
+
+<details>
+<summary>Action chunk size</summary>
+
+<img src="assets/eval-curves/action_chunk_size_best_success_by_beta.png" alt="Best eval success rate for action chunk size across beta">
+
+</details>
