@@ -1,0 +1,12 @@
+description = "bs8 CAN PH osc_pose_delta action-chunk ablation, k=50 with execution length tied to k (no temporal ensembling)"
+group = "configs/train/act_v2/OSC-POSE"
+
+[fixed]
+batch_size = 8
+lr = 1e-5
+beta = 0.1
+use_z = true
+rollout = { episodes = 50, horizon = 250, seed = 42, n_action_steps = [50] }
+
+[grid]
+action_chunk_size = [50]
