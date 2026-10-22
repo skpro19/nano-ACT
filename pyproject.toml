@@ -17,6 +17,10 @@ dev = [
     "ipykernel>=7.3.0",
     "jupyterlab>=4.6.4",
 ]
+export = [
+    "onnx>=1.23.2",
+    "onnxruntime>=1.31.0",
+]
 train = [
     "boto3>=1.43.98",
     "h5py>=3.16.0",
