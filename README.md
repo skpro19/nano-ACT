@@ -98,6 +98,22 @@ Evaluation opens a live viewer by default. Add `--no-on-screen` for headless eva
 
 <img src="assets/eval-curves/action_chunk_size_best_success_by_beta_bs8_legend.png" alt="Best eval success rate for action chunk size across beta">
 
+Tied-action runs sweeping chunk size `k` (`configs/sweep/ph-osc-bs8-naction-tied-k{1,10,50,100}.toml`: OSC pose-delta, batch size 8, lr 1e-5, beta 0.1, 100k steps, commit `b3a1805`):
+
+<table align="center">
+  <thead>
+    <tr><th>k</th><th>run outcome</th><th>wall-clock</th><th>eval success rate</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>100</td><td>success</td><td>2 h 47 m</td><td>not logged</td></tr>
+    <tr><td>50</td><td>success</td><td>2 h 48 m</td><td>not logged</td></tr>
+    <tr><td>10</td><td>success</td><td>3 h 09 m</td><td>not logged</td></tr>
+    <tr><td>1</td><td>success</td><td>6 h 05 m</td><td>not logged</td></tr>
+  </tbody>
+</table>
+
+All four runs finished and their instances were destroyed and verified; checkpoints and training events were backed up to `s3://toy-act/checkpoints/act_v2/` and `s3://toy-act/runs/act_v2/`. Post-run verification reported missing `eval/success_rate` and `throughput/*` scalars for every run, so no success rates are available yet for these chunk sizes and they are not part of the plot above.
+
 ## Acknowledgments
 
 Based on [ACT](https://tonyzhaozh.github.io/aloha/), with demonstrations and simulation provided by [robomimic](https://robomimic.github.io/) and [robosuite](https://robosuite.ai/).
