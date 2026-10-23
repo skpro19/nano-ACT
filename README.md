@@ -96,7 +96,7 @@ Evaluation opens a live viewer by default. Add `--no-on-screen` for headless eva
 
 ### Action chunk size
 
-<img src="assets/eval-curves/action_chunk_size_eval_curves_legend_right.png" alt="Action chunk size ablation eval curves">
+<img src="assets/eval-curves/action_chunk_size_eval_curves_bs8_legend_right.png" alt="Action chunk size ablation eval curves">
 
 <img src="assets/eval-curves/action_chunk_size_best_success_by_beta_bs8_legend.png" alt="Best eval success rate for action chunk size across beta">
 

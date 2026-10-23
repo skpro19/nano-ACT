@@ -9,8 +9,8 @@ in the README lines up.
 ``--sweep-key`` picks the setting named in the legend, which also orders the
 runs: ``auto`` describes the batch size (plus the camera count when the run
 config records it), while ``action-chunk-size`` labels each run with its action
-chunk size ``k``. Values are read from ``config.json`` and fall back to the
-``bs<N>`` / ``k<N>`` token in the run directory name.
+chunk size ``k`` followed by the batch size. Values are read from ``config.json``
+and fall back to the ``bs<N>`` / ``k<N>`` token in the run directory name.
 
 Examples:
     uv run python scripts/utils/plot_eval_curves.py \\
@@ -25,7 +25,7 @@ Examples:
         --run-name 2026-10-22_19-15-47_osc_pose_delta_k50_bs8_... \\
         --sweep-key action-chunk-size \\
         --title "action chunk size ablation" \\
-        --output assets/eval-curves/action_chunk_size_eval_curves_legend_right.png
+        --output assets/eval-curves/action_chunk_size_eval_curves_bs8_legend_right.png
 """
 
 from __future__ import annotations
@@ -144,7 +144,11 @@ def run_label(*, run_dir: Path, config: dict[str, Any], sweep_key: str) -> str:
     if value is None:
         return run_dir.name
     if sweep_key == "action-chunk-size":
-        return f"k={value}"
+        # Chunk size alone is ambiguous, so name the batch size beside it.
+        batch_size = read_int_setting(
+            run_dir=run_dir, config=config, key="batch_size", pattern=BATCH_SIZE_PATTERN
+        )
+        return f"k={value}" if batch_size is None else f"k={value} · bs={batch_size}"
     num_cameras = len(config.get("image_keys", []))
     if not num_cameras:
         return f"bs={value}"
